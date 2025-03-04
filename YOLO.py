@@ -2,8 +2,10 @@ import cv2
 from ultralytics import YOLO
 from tqdm import tqdm
 
+
 # 加载 YOLOv8 目标检测模型
 model = YOLO("yolov8n.pt")  # 选择轻量版 YOLOv8 nano
+
 
 def process_frame(image):
     """
@@ -18,6 +20,7 @@ def process_frame(image):
     image = cv2.putText(image, text, (25, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.25, color, 3)
     
     return image
+
 
 def generate_video(input_video, output_video):
     """
@@ -59,6 +62,7 @@ def generate_video(input_video, output_video):
     cap.release()
     out.release()
     print(f"处理完成，输出视频已保存至: {output_video}")
+
 
 # 运行视频处理
 if __name__ == "__main__":
