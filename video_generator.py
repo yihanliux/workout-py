@@ -22,12 +22,21 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.5
 )
 
+# 滑动窗口存储最近 10 帧的关键点数据
+pose_history = []
+SIMILARITY_THRESHOLD = 0.05  # 归一化后的坐标，阈值较小
+STATIC_THRESHOLD_COUNT = 7  # 过去 10 帧中至少 7 帧相似，则判定为静态
+
 # 关键点索引
 NOSE, LEFT_EAR, RIGHT_EAR = 0, 7, 8
 LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
 LEFT_HIP, RIGHT_HIP = 23, 24
 LEFT_KNEE, RIGHT_KNEE = 25, 26
 LEFT_ANKLE, RIGHT_ANKLE = 27, 28
+
+# 头部和脚部的 Mediapipe 关键点索引
+head_indices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]  # 头部 10 个点
+foot_indices = [27, 28, 29, 30, 31, 32]  # 脚部 6 个点
 
 def draw_text(image, text, position=(25, 100), font_scale=1, color=(0, 0, 255)):
     """
@@ -57,9 +66,90 @@ def detect_people(image):
     results = model(image, verbose=False)
     return sum(int(box.cls) == 0 for box in results[0].boxes)
 
+def normalize_landmarks(cx_list, cy_list):
+    """ 归一化关键点坐标，相对于骨盆中心，并按骨盆到肩膀距离缩放 """
+    cx_array = np.array(cx_list, dtype=np.float32)
+    cy_array = np.array(cy_list, dtype=np.float32)
+
+    # 确保关键点数量正确
+    if len(cx_array) < 33 or len(cy_array) < 33:
+        return None  # 避免关键点缺失导致错误
+
+    # 计算骨盆中心（点 23 和 24 的中点）
+    pelvis_x = (cx_array[23] + cx_array[24]) / 2
+    pelvis_y = (cy_array[23] + cy_array[24]) / 2
+
+    # 计算肩膀中心（点 11 和 12 的中点）
+    shoulder_x = (cx_array[11] + cx_array[12]) / 2
+    shoulder_y = (cy_array[11] + cy_array[12]) / 2
+
+    # 计算骨盆到肩膀的距离，作为归一化尺度
+    scale_factor = np.linalg.norm([shoulder_x - pelvis_x, shoulder_y - pelvis_y])
+
+    if scale_factor == 0:
+        return None  # 避免除零错误
+
+    # 归一化关键点
+    norm_cx = (cx_array - pelvis_x) / scale_factor
+    norm_cy = (cy_array - pelvis_y) / scale_factor
+
+    return np.column_stack((norm_cx, norm_cy))
+
+def compute_similarity(current, previous):
+    """计算两帧之间的相似度，使用归一化后的欧几里得距离"""
+    if current is None or previous is None:
+        return float('inf')
+    
+    distances = np.linalg.norm(current - previous, axis=1)  # 计算 33 个关键点的欧几里得距离
+    return np.mean(distances)  # 取平均值作为全局相似度
+
+def determine_motion_state(current_pose):
+    """判断当前帧是静态还是动态"""
+    global pose_history
+
+    if len(pose_history) == 0:
+        pose_history.append(current_pose)  # 存入第一帧，避免后续出错
+        return "Not classified"
+
+    # 计算当前帧与过去帧的相似度
+    similarity_scores = [compute_similarity(current_pose, past_pose) for past_pose in pose_history]
+    
+    # 计算过去 10 帧中，有多少帧相似度小于阈值
+    static_count = sum(score < SIMILARITY_THRESHOLD for score in similarity_scores)
+
+    # 过去 10 帧中至少 STATIC_THRESHOLD_COUNT 帧相似，则判定为静态
+    motion_state = "Static" if static_count >= STATIC_THRESHOLD_COUNT else "Dynamic"
+
+    # 更新滑动窗口，最多保留 10 帧
+    pose_history.append(current_pose)
+    if len(pose_history) > 10:
+        pose_history.pop(0)
+
+    return motion_state
+
 def euclidean_dist(x1, y1, x2, y2):
     """计算两个点之间的欧几里得距离"""
     return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+def max_head_to_foot_distance(cx_list, cy_list):
+    max_distance = 0
+    farthest_points = (None, None)  # 存储最远点的索引
+    
+    # 遍历所有头部和脚部点，计算欧几里得距离
+    for h in head_indices:
+        for f in foot_indices:
+            x1, y1 = cx_list[h], cy_list[h]
+            x2, y2 = cx_list[f], cy_list[f]
+            
+            # 计算欧几里得距离
+            distance = euclidean_dist(x1, y1, x2, y2)
+            
+            # 记录最大距离
+            if distance > max_distance:
+                max_distance = distance
+                farthest_points = (h, f)
+    
+    return max_distance
 
 def calculate_body_height(cx_list, cy_list):
     """计算人体的完整高度，包括头顶和脚底，并返回 body_height"""
@@ -70,14 +160,6 @@ def calculate_body_height(cx_list, cy_list):
 
     # 计算鼻子到肩膀中点的距离
     head_to_shoulder = euclidean_dist(cx_list[NOSE], cy_list[NOSE], shoulder_mid_x, shoulder_mid_y)
-
-    # 计算左右耳到鼻子的距离，并取平均值
-    left_ear_to_nose = euclidean_dist(cx_list[NOSE], cy_list[NOSE], cx_list[LEFT_EAR], cy_list[LEFT_EAR])
-    right_ear_to_nose = euclidean_dist(cx_list[NOSE], cy_list[NOSE], cx_list[RIGHT_EAR], cy_list[RIGHT_EAR])
-    ear_to_nose_dist = (left_ear_to_nose + right_ear_to_nose) / 2  # 取平均值
-
-    # 使用耳朵到鼻子的距离估算头顶高度
-    head_to_top = ear_to_nose_dist * 1.5  # 估算头顶到鼻子的距离
 
     # 计算左侧和右侧身高（使用欧几里得距离）
     def compute_side_height(shoulder, hip, knee, ankle):
@@ -92,12 +174,14 @@ def calculate_body_height(cx_list, cy_list):
     right_height = compute_side_height(RIGHT_SHOULDER, RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE)
 
     # 计算人体总高度
-    body_height = (left_height + right_height) / 2
-    #body_height += head_to_shoulder  # 添加头部高度（鼻子到肩膀）
-    body_height += head_to_top  # 直接加上头顶到鼻子的高度
-    #body_height += body_height * 0.045  # 添加脚底的估算高度
+    body_height = max(left_height, right_height)
+    body_height += head_to_shoulder  # 加上鼻子到肩膀的高度
+    body_height += 1.7 * head_to_shoulder  # 加上头顶到鼻子的高度
+    body_height += 0.05 * body_height # 加上脚的高度
 
-    return body_height
+    max_distance = max_head_to_foot_distance(cx_list, cy_list)
+
+    return max(body_height, max_distance)
 
 def calculate_head_y(cy_list, body_height):
     """计算头部的归一化高度（相对于地面高度），处理 None 值"""
@@ -108,41 +192,6 @@ def calculate_head_y(cy_list, body_height):
     head_y = (ground_y - cy_list[NOSE]) / body_height
 
     return head_y, ground_y
-
-def analyze_orientation_(cy_list, body_height, tilt_threshold=0.04):
-    """
-    计算耳朵高度差和鼻子与耳朵的相对高度差，以判断头部姿态。
-
-    参数：
-    - cy_list: 包含 33 个关键点的 y 坐标列表。
-    - body_height: 计算得到的人体高度（单位：像素）
-    - tilt_threshold: 归一化的耳朵 y 轴差值阈值（默认 3%）
-
-    返回：
-    - "up"（面朝上）
-    - "down"（面朝下）
-    - "tilted"（左右倾斜）
-    - "neutral"（正常朝前）
-    """
-
-    # 计算鼻子相对耳朵的 y 轴高度差
-    nose_ear_avg_diff = (((cy_list[NOSE] - cy_list[LEFT_EAR]) + (cy_list[NOSE] - cy_list[RIGHT_EAR])) / 2) / body_height
-
-    # 计算正常站立情况下的基准线
-    neutral_baseline = 0.02  # 经验值：一般人的鼻子比耳朵低 2% 身高（这个可以调整）
-
-    # 计算归一化的左右耳高度差（判断左右倾斜）
-    ear_diff = abs(cy_list[LEFT_EAR] - cy_list[RIGHT_EAR]) / body_height
-
-    # 判断头部姿态
-    if nose_ear_avg_diff < (neutral_baseline - tilt_threshold):  
-        return "up"
-    if nose_ear_avg_diff > (neutral_baseline + tilt_threshold):  
-        return "down"
-    if ear_diff > tilt_threshold:  
-        return "tilted"
-    
-    return "neutral"
 
 def analyze_orientation(cx_list, cy_list):
     """
@@ -159,28 +208,28 @@ def analyze_orientation(cx_list, cy_list):
     """
 
     # 计算鼻子-左耳、鼻子-右耳的角度
-    dx_left = abs(cx_list[NOSE] - cx_list[LEFT_EAR])
-    dy_left = abs(cy_list[NOSE] - cy_list[LEFT_EAR])
+    dx_left = cy_list[NOSE] - cy_list[LEFT_EAR]
+    dy_left = cx_list[NOSE] - cx_list[LEFT_EAR]
 
-    dx_right = abs(cx_list[NOSE] - cx_list[RIGHT_EAR])
-    dy_right = abs(cy_list[NOSE] - cy_list[RIGHT_EAR])
+    dx_right = cy_list[NOSE] - cy_list[RIGHT_EAR]
+    dy_right = cx_list[NOSE] - cx_list[RIGHT_EAR]
 
     # 计算左右耳相对鼻子的角度（转换为角度制）
-    angle_left = np.degrees(np.arctan2(dy_left, dx_left))
-    angle_right = np.degrees(np.arctan2(dy_right, dx_right))
+    angle_left = abs(np.degrees(np.arctan2(dy_left, dx_left)))
+    angle_right = abs(np.degrees(np.arctan2(dy_right, dx_right)))
 
     # 计算平均角度
     avg_angle = (angle_left + angle_right) / 2
 
     # 根据角度分类姿态
-    if 60 <= avg_angle <= 90:
-        return "standing"
-    elif 0 <= avg_angle < 60:
-        return "down"  # 趴着
-    elif 90 < avg_angle <= 180:
-        return "up"  # 躺着
+    if 40 <= avg_angle <= 100:
+        return "neutral", avg_angle
+    elif 0 <= avg_angle <= 40:
+        return "down" , avg_angle
+    elif 100 <= avg_angle <= 180:
+        return "up", avg_angle
     else:
-        return "unknown"
+        return "unknown", avg_angle
 
 def process_pose(image):
     """处理人体姿态，返回关键点坐标，如果数据缺失则直接返回 'Insufficient data'"""
@@ -212,8 +261,10 @@ def process_pose(image):
     # 关键点完整性检查
     if any(cx_list[p] is None or cy_list[p] is None for p in required_points):
         return "Insufficient data"
+    
+    norm_list = normalize_landmarks(cx_list, cy_list)
 
-    return cx_list, cy_list
+    return cx_list, cy_list, norm_list
 
 def process_frame(image):
     """处理单帧图像，并返回 JSON 记录"""
@@ -225,32 +276,36 @@ def process_frame(image):
         "people_count": None,
         "body_height": None,
         "orientation": None,
-        "head_y": None
+        "head_y": None,
+        "motion_state": None
     }
     
     people_count = detect_people(image)
     frame_data.update({"people_count": people_count})
     draw_text(image, f"YOLO: People: {people_count}")
 
-
     pose_data = process_pose(image)
     if pose_data == "Insufficient data":
         draw_text(image, 'No Person', (25, 200))
     else:
-        cx_list, cy_list = pose_data
+        cx_list, cy_list , norm_list= pose_data
 
         body_height = calculate_body_height(cx_list, cy_list)
         frame_data.update({"body_height": body_height})
         draw_text(image, f'Body Height: {body_height}', (25, 200))
 
-        orientation = analyze_orientation(cy_list, body_height)
+        orientation, avg_angle = analyze_orientation(cx_list, cy_list)
         frame_data.update({"orientation": orientation})
         draw_text(image, f'Orientation: {orientation}', (25, 300))
+        draw_text(image, f'avg_angle: {avg_angle}', (25, 500))
 
         head_y, ground_y = calculate_head_y(cy_list, body_height)
         frame_data.update({"head_y": head_y})
         draw_text(image, f'Head Height: {head_y}', (25, 400))
-        draw_text(image, f'ground_y: {ground_y}', (25, 500))
+
+        motion_state = determine_motion_state(norm_list)
+        frame_data.update({"motion_state": motion_state})
+        draw_text(image, f'Motion State: {motion_state}', (25, 600))
     
     return image, frame_data
 
@@ -297,10 +352,10 @@ def generate_video(input_video, output_video):
     cv2.destroyAllWindows()
 
     # 将数据写入 JSON 文件
-    json_output = "output_data8_.json"
+    json_output = "output_data8.json"
     output_data = {
-    "fps": fps,  
-    "frames": frame_data_list     
+        "fps": fps,  
+        "frames": frame_data_list     
     }
     with open(json_output, "w") as f:
         json.dump(output_data, f, indent=4)
@@ -345,8 +400,6 @@ def generate_video2(input_video, output_video):
                     last_processed_frame = processed_frame  # 记录当前帧的图像
                 except Exception as e:
                     print(f"处理帧时出错: {e}")
-                    processed_frame = frame  # 发生异常时使用原始帧
-                    last_processed_frame = processed_frame
             else:
                 processed_frame = last_processed_frame  # 复制上一帧的图像
                 frame_data = last_frame_data  # 复制上一帧的数据
@@ -362,7 +415,7 @@ def generate_video2(input_video, output_video):
     cv2.destroyAllWindows()
 
     # 将数据写入 JSON 文件
-    json_output = "output_data.json"
+    json_output = "output_data10.json"
     output_data = {
         "fps": fps,  
         "frames": frame_data_list     
@@ -373,7 +426,5 @@ def generate_video2(input_video, output_video):
     print(f"处理完成，输出视频已保存至: {output_video}")
     print(f"帧数据已保存至: {json_output}")
 
-
-
 if __name__ == "__main__":
-    generate_video("video8.mp4", "output_test8_.mp4")
+    generate_video2("video10.mp4", "output_test10.mp4")

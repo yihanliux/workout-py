@@ -6,14 +6,14 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
 # ========================= 1. 读取 JSON 数据 =========================
-def load_json_data(filename="output_data8_.json"):
+def load_json_data(filename):
     """读取 JSON 文件并解析数据"""
     try:
         with open(filename, "r") as f:
             data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         print(f"错误: 无法读取 {filename}，请检查文件路径或格式。")
-        return 0, [], [], [], []
+        return 0, [], [], [], [], []
     
     # 解析 JSON 数据
     fps = data.get("fps", 30)  # 读取 fps，默认 30
@@ -22,14 +22,15 @@ def load_json_data(filename="output_data8_.json"):
     people_counts = [frame.get("people_count") for frame in frames]
     body_height = [frame.get("body_height") for frame in frames]  
     orientation = [frame.get("orientation") for frame in frames] 
-    head_y = [frame.get("head_y") for frame in frames]  
+    head_y = [frame.get("head_y") for frame in frames]
+    motion_states = [frame.get("motion_state") for frame in frames]
     
     print("视频总共有", len(people_counts), "帧，帧率:", fps, "FPS")
     
-    return fps, people_counts, body_height, orientation, head_y
+    return fps, people_counts, body_height, orientation, head_y, motion_states
 
 
-def filter_stable_data(people_counts, orientation, window_size=10, consensus_ratio=0.8):
+def filter_stable_data(people_counts, orientation, motion_states, window_size=10, consensus_ratio=0.8):
     """
     平滑数据，移除噪音，同时保留所有数据。
     使 `people_counts`, `orientation` 更稳定。
@@ -37,14 +38,16 @@ def filter_stable_data(people_counts, orientation, window_size=10, consensus_rat
     参数:
         people_counts: list[int] - 每一帧的人数数据
         orientation list[str] - 每一帧的面部朝向
+        motion_states: list[str] - 每一帧的运动状态 ('static' 或 'dynamic')
         window_size: int - 滑动窗口大小
         consensus_ratio: float - 认定最常见值的比例 (默认 80%)
 
     返回:
-        filtered_people_counts, filtered_orientation
+        filtered_people_counts, filtered_orientation, filtered_motion_states
     """
     filtered_people_counts = people_counts[:]
     filtered_orientation = orientation[:]
+    filtered_motion_states = motion_states[:]
 
     for i in range(len(people_counts)):
         start, end = max(0, i - window_size), min(len(people_counts), i + window_size)
@@ -52,19 +55,22 @@ def filter_stable_data(people_counts, orientation, window_size=10, consensus_rat
         # 计算滑动窗口内的最常见值
         most_common_people = max(set(people_counts[start:end]), key=people_counts[start:end].count)
         most_common_orientation = max(set(orientation[start:end]), key=orientation[start:end].count)
+        most_common_motion = max(set(motion_states[start:end]), key=motion_states[start:end].count)
 
         # 计算最常见值的占比
         people_consensus = people_counts[start:end].count(most_common_people) / (end - start)
         orientation_consensus = orientation[start:end].count(most_common_orientation) / (end - start)
+        motion_consensus = motion_states[start:end].count(most_common_motion) / (end - start)
 
         # 如果最常见值的比例超过 `consensus_ratio`，就采用它，否则保持原值
         filtered_people_counts[i] = most_common_people if people_consensus >= consensus_ratio else people_counts[i]
         filtered_orientation[i] = most_common_orientation if orientation_consensus >= consensus_ratio else orientation[i]
-    
-    return filtered_people_counts, filtered_orientation
+        filtered_motion_states[i] = most_common_motion if motion_consensus >= consensus_ratio else motion_states[i]
+
+    return filtered_people_counts, filtered_orientation, filtered_motion_states
 
 
-def analyze_orientation_durations(people_counts, orientation, body_height, fps=30, duration_sec=15, factor=1.3):
+def analyze_orientation_segments(people_counts, orientation, body_height, fps=30, duration_sec=15, factor=1.3):
     """
     1. 记录所有 people_counts == 1 的连续间隔
     2. 合并短于 fps * duration_sec 的区间到前一个姿势
@@ -76,8 +82,13 @@ def analyze_orientation_durations(people_counts, orientation, body_height, fps=3
     orient_segments = []
     current_orient, start_frame = None, None
 
+    # 预处理，将无效姿势转换为 "Invalid"
+    orientation = [
+        'Invalid' if orient is None else orient
+        for orient in orientation
+    ]
 
-     # 遍历每一帧的姿态方向，分割不同的片段
+    # 遍历每一帧的姿态方向，分割不同的片段
     for i, orient in enumerate(orientation):
         if current_orient is None:
             current_orient, start_frame = orient, i
@@ -105,8 +116,9 @@ def analyze_orientation_durations(people_counts, orientation, body_height, fps=3
             "duration_frames": duration
         })
 
+
     # 处理最后一个片段如果是 None，则尝试删除无效片段
-    if orient_segments and orient_segments[-1]["orient"] == None:
+    if orient_segments and orient_segments[-1]["orient"] == "Invalid":
         new_segments = orient_segments[:-1]  # 复制去掉最后一个 None 的片段
         last_invalid_segment = orient_segments[-1]
 
@@ -118,35 +130,35 @@ def analyze_orientation_durations(people_counts, orientation, body_height, fps=3
             new_segments.pop()  # 移除已合并片段
         orient_segments = new_segments
 
-    final_segments = orient_segments[:]  # 先复制 orient_segments
-    while True:  # 进入循环，直到所有短片段都被合并
-        updated_segments = []
-        merged = False  # 记录是否发生了合并
 
-        for i, segment in enumerate(final_segments):
-            if updated_segments and segment["duration_frames"] < min_duration_frames:
-                # **合并短片段到前一个姿势段**
-                updated_segments[-1]["end_frame"] = segment["end_frame"]
-                updated_segments[-1]["duration_sec"] = (
-                    updated_segments[-1]["end_frame"] - updated_segments[-1]["start_frame"] + 1
-                ) / fps
-                updated_segments[-1]["duration_frames"] = (
-                    updated_segments[-1]["end_frame"] - updated_segments[-1]["start_frame"] + 1
-                )
-                merged = True  # 记录合并发生
-            else:
-                updated_segments.append(segment)
+    # final_segments = orient_segments[:]  # 先复制 orient_segments
+    # while True:  # 进入循环，直到所有短片段都被合并
+    #     updated_segments = []
+    #     merged = False  # 记录是否发生了合并
 
-        # 如果本轮没有发生合并，跳出循环
-        if not merged:
-            break
-        # 更新 final_segments，进行下一轮合并检查
-        final_segments = updated_segments
+    #     for i, segment in enumerate(final_segments):
+    #         if updated_segments and segment["duration_frames"] < min_duration_frames:
+    #             # **合并短片段到前一个姿势段**
+    #             updated_segments[-1]["end_frame"] = segment["end_frame"]
+    #             updated_segments[-1]["duration_sec"] = (
+    #                 updated_segments[-1]["end_frame"] - updated_segments[-1]["start_frame"] + 1
+    #             ) / fps
+    #             updated_segments[-1]["duration_frames"] = (
+    #                 updated_segments[-1]["end_frame"] - updated_segments[-1]["start_frame"] + 1
+    #             )
+    #             merged = True  # 记录合并发生
+    #         else:
+    #             updated_segments.append(segment)
 
+    #     # 如果本轮没有发生合并，跳出循环
+    #     if not merged:
+    #         break
+    #     # 更新 final_segments，进行下一轮合并检查
+    #     final_segments = updated_segments
 
     # **合并相邻相同姿势**
     merged_segments = []
-    for segment in final_segments:
+    for segment in orient_segments:
         if merged_segments and merged_segments[-1]["orient"] == segment["orient"]:
             # 合并到前一个相同姿势段
             merged_segments[-1]["end_frame"] = segment["end_frame"]
@@ -200,12 +212,131 @@ def analyze_orientation_durations(people_counts, orientation, body_height, fps=3
         merged_segments.pop(0)
 
     # **最后一步检查：删除最后一个 'Invalid' 片段**
-    if merged_segments and merged_segments[-1]["orient"] == None:
+    if merged_segments and merged_segments[-1]["orient"] == "Invalid":
         print(f"🗑 删除最后一个 'Invalid' 片段: {merged_segments[-1]}")
+        merged_segments.pop(-1)
+    
+    # **最后一步检查：删除第一个 'Invalid' 片段**
+    if merged_segments and merged_segments[0]["orient"] == "Invalid":
+        print(f"🗑 删除第一个 'Invalid' 片段: {merged_segments[0]}")
         merged_segments.pop(-1)
 
     return merged_segments
 
+
+def refine_orientation_segments_with_motion(orientation_segments, motion_states, fps=30, duration_sec=15):
+    """
+    细化姿势片段，基于 motion_state 进行二次分割，合并短片段，并合并相邻的相同姿势+motion_state。
+
+    参数:
+        orientation_segments: list[dict] - 姿势片段，每个包含 start_frame, end_frame, orientation
+        motion_states: list[str] - 每一帧的 motion_state（'Static' 或 'Dynamic'）
+        fps: int - 每秒的帧数，默认 30
+        duration_sec: int - 最小合并阈值（小于该时间的片段会合并到后一个片段）
+
+    返回:
+        refined_segments: list[dict] - 细化后的姿势片段
+    """
+    min_duration_frames = fps * duration_sec  # 计算最小 15 秒对应的帧数
+
+    refined_segments = []
+
+    for segment in orientation_segments:
+        start, end, orient = segment["start_frame"], segment["end_frame"], segment["orient"]
+        motion_segment_list = []
+        current_motion, motion_start = None, None
+
+        # 遍历姿势片段内部的 motion_state
+        for i in range(start, end + 1):
+            motion = motion_states[i]
+
+            if current_motion is None:
+                current_motion, motion_start = motion, i
+            elif motion != current_motion:
+                motion_end = i - 1
+                duration = motion_end - motion_start + 1
+                motion_segment_list.append({
+                    "orient": orient,
+                    "motion_state": current_motion,
+                    "start_frame": motion_start,
+                    "end_frame": motion_end,
+                    "duration_sec": duration / fps,
+                    "duration_frames": duration
+                })
+                current_motion, motion_start = motion, i
+
+        # 记录最后一个 motion_state 片段
+        if current_motion is not None:
+            motion_end = end
+            duration = motion_end - motion_start + 1
+            motion_segment_list.append({
+                "orient": orient,
+                "motion_state": current_motion,
+                "start_frame": motion_start,
+                "end_frame": motion_end,
+                "duration_sec": duration / fps,
+                "duration_frames": duration
+            })
+
+        # **循环合并短片段**
+        while True:
+            merged_segments = []
+            merged = False
+            i = 0
+            while i < len(motion_segment_list):
+                if i > 0 and motion_segment_list[i]["duration_frames"] < min_duration_frames:
+                    # **合并短片段到前一个片段**
+                    merged_segments[-1]["end_frame"] = motion_segment_list[i]["end_frame"]
+                    merged_segments[-1]["duration_sec"] = (
+                        merged_segments[-1]["end_frame"] - merged_segments[-1]["start_frame"] + 1
+                    ) / fps
+                    merged_segments[-1]["duration_frames"] = (
+                        merged_segments[-1]["end_frame"] - merged_segments[-1]["start_frame"] + 1
+                    )
+                    merged = True
+                else:
+                    merged_segments.append(motion_segment_list[i])
+                i += 1
+
+            motion_segment_list = merged_segments
+
+            # **如果没有发生合并，则停止循环**
+            if not merged:
+                break
+
+        # **合并第一个片段到后面，而不是删除**
+        if len(motion_segment_list) > 1 and motion_segment_list[0]["duration_frames"] < min_duration_frames:
+            print(f"🔄 合并第一个短片段到后一个: {motion_segment_list[0]}")
+            motion_segment_list[1]["start_frame"] = motion_segment_list[0]["start_frame"]
+            motion_segment_list[1]["duration_sec"] = (
+                motion_segment_list[1]["end_frame"] - motion_segment_list[1]["start_frame"] + 1
+            ) / fps
+            motion_segment_list[1]["duration_frames"] = (
+                motion_segment_list[1]["end_frame"] - motion_segment_list[1]["start_frame"] + 1
+            )
+            motion_segment_list.pop(0)  # 删除第一个片段（已合并）
+
+        refined_segments.extend(motion_segment_list)
+
+    # **合并相邻相同姿势+motion_state**
+    final_segments = []
+    for segment in refined_segments:
+        if final_segments and (
+            final_segments[-1]["orient"] == segment["orient"]
+            and final_segments[-1]["motion_state"] == segment["motion_state"]
+        ):
+            # **合并到前一个相同姿势+motion_state 片段**
+            final_segments[-1]["end_frame"] = segment["end_frame"]
+            final_segments[-1]["duration_sec"] = (
+                final_segments[-1]["end_frame"] - final_segments[-1]["start_frame"] + 1
+            ) / fps
+            final_segments[-1]["duration_frames"] = (
+                final_segments[-1]["end_frame"] - final_segments[-1]["start_frame"] + 1
+            )
+        else:
+            final_segments.append(segment)
+
+    return final_segments
 
 # ========================= 5. 绘图方法 =========================
 def plot_orientation_durations(orientation_durations):
@@ -213,18 +344,18 @@ def plot_orientation_durations(orientation_durations):
 
     # 定义姿势对应的高度
     Height_map = {
-        'neutral': 3,
-        'tilted': 2,
-        'up': 1,
-        'down': 1
+        'neutral': 2,
+        'up': 3,
+        'down': 1,
+        'Invalid':0
     }
 
     # 颜色映射
     color_map = {
         'neutral': 'lightblue',
-        'tilted': 'lightgreen',
-        'up': 'lightcoral',
-        'down': 'lightsalmon'
+        'up': 'lightgreen',
+        'down': 'lightsalmon',
+        'Invalid': 'lightgray'
     }
 
     # 绘制折线图并填充颜色
@@ -298,16 +429,85 @@ def plot_height_variation(head_y, orientation_durations):
     plt.grid()
     plt.show()
 
+def plot_combined_single_axis(head_y, orientation_durations):
+    """在同一张图上绘制高度变化和姿势变化区域，并在Static片段覆盖交叉线"""
+
+    if not head_y:
+        print("错误: head_y 为空，无法绘制图表。")
+        return
+    
+    if not orientation_durations:
+        print("错误: orientation_durations 为空，无法确定绘制区间。")
+        return
+    
+    start_frame = min(seg["start_frame"] for seg in orientation_durations)
+    end_frame = max(seg["end_frame"] for seg in orientation_durations)
+    
+    start_frame = max(0, start_frame)
+    end_frame = min(len(head_y) - 1, end_frame)
+    
+    filtered_head_y = [head_y[i] if head_y[i] is not None else np.nan for i in range(start_frame, end_frame + 1)]
+    filtered_head_y = pd.Series(filtered_head_y).interpolate(method='linear').tolist()
+    
+    x_values = np.arange(start_frame, end_frame + 1)
+
+    plt.figure(figsize=(10, 5))
+
+    # 绘制 head_y 高度变化曲线
+    plt.plot(x_values, filtered_head_y, marker='o', markersize=3, linestyle='-', color='b', label='Height Variation')
+
+    # 定义姿势对应的高度
+    Height_map = {
+        'neutral': 2,
+        'up': 3,
+        'down': 1,
+        'Invalid': 0
+    }
+
+    # 颜色映射
+    color_map = {
+        'neutral': 'lightblue',
+        'up': 'lightgreen',
+        'down': 'lightsalmon',
+        'Invalid': 'lightgray'
+    }
+
+    for entry in orientation_durations:
+        start_time = entry["start_frame"]
+        end_time = entry["end_frame"]
+        Height = Height_map[entry["orient"]]
+
+        # 填充颜色
+        poly = plt.fill_between([start_time, end_time], 0, Height, 
+                         color=color_map[entry["orient"]], alpha=0.5, 
+                         label=entry["orient"] if entry["orient"] not in plt.gca().get_legend_handles_labels()[1] else "")
+
+        # 确保 motion_state 存在并且是 'Static'，否则跳过
+        if entry.get("motion_state") == "Static":
+            plt.fill_between([start_time, end_time], 0, Height, 
+                             facecolor='none', edgecolor='black', hatch='//', alpha=0.5)
+
+    plt.xlabel("Frame Index")
+    plt.ylabel("Height Level / Face orientation")
+    plt.title("Head Height & Face orientation Variation Over Time")
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.show()
+
 # ========================= 6. 运行主程序 =========================
 if __name__ == "__main__":
-    fps, people_counts, body_height, orientation, head_y = load_json_data()
+
+    filename="output_data10.json"
+    fps, people_counts, body_height, orientation, head_y, motion_states = load_json_data(filename)
     
 
-    filtered_people_counts, filtered_orientation = filter_stable_data(people_counts, orientation)
-    orientation_durations = analyze_orientation_durations(filtered_people_counts, filtered_orientation, body_height, fps)
-    print(orientation_durations)
-    plot_orientation_durations(orientation_durations)
-    plot_height_variation(head_y, orientation_durations)
+    filtered_people_counts, filtered_orientation, filtered_motion_states = filter_stable_data(people_counts, orientation, motion_states)
+    orientation_segments = analyze_orientation_segments(filtered_people_counts, filtered_orientation, body_height, fps)
+    #orientation_segments = refine_orientation_segments_with_motion(orientation_segments, motion_states)
+    print(orientation_segments)
+    # plot_orientation_segments(orientation_segments)
+    # plot_height_variation(head_y, orientation_segments)
+    plot_combined_single_axis(head_y, orientation_segments)
 
 
     
