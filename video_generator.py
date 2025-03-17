@@ -4,11 +4,7 @@ import matplotlib.pyplot as plt
 import json
 from ultralytics import YOLO
 from tqdm import tqdm
-from itertools import combinations
-import math
 import numpy as np
-
-import data_processer
 
 # 初始化YOLO和MediaPipe
 model = YOLO("yolov8n.pt")
@@ -28,7 +24,7 @@ SIMILARITY_THRESHOLD = 0.05  # 归一化后的坐标，阈值较小
 STATIC_THRESHOLD_COUNT = 7  # 过去 10 帧中至少 7 帧相似，则判定为静态
 
 # 关键点索引
-NOSE, LEFT_EAR, RIGHT_EAR = 0, 7, 8
+NOSE, LEFT_EAR, RIGHT_EAR, LEFT_MOUTH, RIGHT_MOUTH = 0, 7, 8, 9, 10
 LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
 LEFT_HIP, RIGHT_HIP = 23, 24
 LEFT_KNEE, RIGHT_KNEE = 25, 26
@@ -133,7 +129,6 @@ def euclidean_dist(x1, y1, x2, y2):
 
 def max_head_to_foot_distance(cx_list, cy_list):
     max_distance = 0
-    farthest_points = (None, None)  # 存储最远点的索引
     
     # 遍历所有头部和脚部点，计算欧几里得距离
     for h in head_indices:
@@ -147,7 +142,6 @@ def max_head_to_foot_distance(cx_list, cy_list):
             # 记录最大距离
             if distance > max_distance:
                 max_distance = distance
-                farthest_points = (h, f)
     
     return max_distance
 
@@ -191,9 +185,9 @@ def calculate_head_y(cy_list, body_height):
 
     head_y = (ground_y - cy_list[NOSE]) / body_height
 
-    return head_y, ground_y
+    return head_y
 
-def analyze_orientation(cx_list, cy_list):
+def analyze_orientation(cx_list, cy_list, body_height):
     """
     计算鼻子-左右耳的连线角度，以判断头部姿态（0-180°）。
 
@@ -221,9 +215,18 @@ def analyze_orientation(cx_list, cy_list):
     # 计算平均角度
     avg_angle = (angle_left + angle_right) / 2
 
+    d_ear_x = abs(cx_list[RIGHT_EAR] - cx_list[LEFT_EAR])
+    threshold = 0.02 * body_height
+
     # 根据角度分类姿态
     if 40 <= avg_angle <= 100:
-        return "neutral", avg_angle
+        if  d_ear_x < threshold:
+            if  d_ear_x > cx_list[NOSE]:
+                return "left", d_ear_x
+            else: 
+                return "right", d_ear_x
+        else:
+            return "neutral", d_ear_x
     elif 0 <= avg_angle <= 40:
         return "down" , avg_angle
     elif 100 <= avg_angle <= 180:
@@ -294,12 +297,12 @@ def process_frame(image):
         frame_data.update({"body_height": body_height})
         draw_text(image, f'Body Height: {body_height}', (25, 200))
 
-        orientation, avg_angle = analyze_orientation(cx_list, cy_list)
+        orientation, avg_angle = analyze_orientation(cx_list, cy_list, body_height)
         frame_data.update({"orientation": orientation})
         draw_text(image, f'Orientation: {orientation}', (25, 300))
         draw_text(image, f'avg_angle: {avg_angle}', (25, 500))
 
-        head_y, ground_y = calculate_head_y(cy_list, body_height)
+        head_y = calculate_head_y(cy_list, body_height)
         frame_data.update({"head_y": head_y})
         draw_text(image, f'Head Height: {head_y}', (25, 400))
 
@@ -415,7 +418,7 @@ def generate_video2(input_video, output_video):
     cv2.destroyAllWindows()
 
     # 将数据写入 JSON 文件
-    json_output = "output_data10.json"
+    json_output = "output_data11.json"
     output_data = {
         "fps": fps,  
         "frames": frame_data_list     
@@ -427,4 +430,4 @@ def generate_video2(input_video, output_video):
     print(f"帧数据已保存至: {json_output}")
 
 if __name__ == "__main__":
-    generate_video2("video10.mp4", "output_test10.mp4")
+    generate_video2("video11.mp4", "output_test11.mp4")
