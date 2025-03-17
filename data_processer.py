@@ -601,7 +601,7 @@ def merge_RL_orientation_segments(orientation_segments, fps=30, min_duration_sec
 
     return merged_segments
 
-def merge_alternating_orients(orientation_segments, fps=30, max_swaps=18, min_duration_sec=3):
+def merge_alternating_orients(orientation_segments, fps=30, max_swaps=15, min_duration_sec=3):
 
     # **合并相邻相同姿势**
     merged_segments = []
@@ -621,12 +621,13 @@ def merge_alternating_orients(orientation_segments, fps=30, max_swaps=18, min_du
     
     while i < len(orientation_segments) - 1:
         current_orient = orientation_segments[i]['orient']
+        current_frame = orientation_segments[i]['duration_frames']
         next_orient = orientation_segments[i + 1]['orient']
         swap_count = 0
         combined_segments = [orientation_segments[i]]
         j = i + 1  # 用 j 来收集后续片段
         
-        if current_orient != next_orient:
+        if current_orient != next_orient and current_frame < min_duration_frames:
             combined_segments.append(orientation_segments[j])
             j += 1
             
@@ -667,7 +668,6 @@ def merge_alternating_orients(orientation_segments, fps=30, max_swaps=18, min_du
         result.append(orientation_segments[i])
     
     return result
-
 
 def merge_orientation_segments(orientation_segments, orientation, body_height, head_y, fps=30, min_duration_sec=3, max_duration_sec=15):
 
@@ -776,120 +776,6 @@ def merge_orientation_segments(orientation_segments, orientation, body_height, h
     
     return orientation_segments, orientation, body_height, head_y
 
-def refine_orientation_segments_with_motion(orientation_segments, motion_states, fps=30, duration_sec=15):
-    """
-    细化姿势片段，基于 motion_state 进行二次分割，合并短片段，并合并相邻的相同姿势+motion_state。
-
-    参数:
-        orientation_segments: list[dict] - 姿势片段，每个包含 start_frame, end_frame, orientation
-        motion_states: list[str] - 每一帧的 motion_state（'Static' 或 'Dynamic'）
-        fps: int - 每秒的帧数，默认 30
-        duration_sec: int - 最小合并阈值（小于该时间的片段会合并到后一个片段）
-
-    返回:
-        refined_segments: list[dict] - 细化后的姿势片段
-    """
-    min_duration_frames = fps * duration_sec  # 计算最小 15 秒对应的帧数
-
-    refined_segments = []
-
-    for segment in orientation_segments:
-        start, end, orient = segment["start_frame"], segment["end_frame"], segment["orient"]
-        motion_segment_list = []
-        current_motion, motion_start = None, None
-
-        # 遍历姿势片段内部的 motion_state
-        for i in range(start, end + 1):
-            motion = motion_states[i]
-
-            if current_motion is None:
-                current_motion, motion_start = motion, i
-            elif motion != current_motion:
-                motion_end = i - 1
-                duration = motion_end - motion_start + 1
-                motion_segment_list.append({
-                    "orient": orient,
-                    "motion_state": current_motion,
-                    "start_frame": motion_start,
-                    "end_frame": motion_end,
-                    "duration_sec": duration / fps,
-                    "duration_frames": duration
-                })
-                current_motion, motion_start = motion, i
-
-        # 记录最后一个 motion_state 片段
-        if current_motion is not None:
-            motion_end = end
-            duration = motion_end - motion_start + 1
-            motion_segment_list.append({
-                "orient": orient,
-                "motion_state": current_motion,
-                "start_frame": motion_start,
-                "end_frame": motion_end,
-                "duration_sec": duration / fps,
-                "duration_frames": duration
-            })
-
-        # **循环合并短片段**
-        while True:
-            merged_segments = []
-            merged = False
-            i = 0
-            while i < len(motion_segment_list):
-                if i > 0 and motion_segment_list[i]["duration_frames"] < min_duration_frames:
-                    # **合并短片段到前一个片段**
-                    merged_segments[-1]["end_frame"] = motion_segment_list[i]["end_frame"]
-                    merged_segments[-1]["duration_sec"] = (
-                        merged_segments[-1]["end_frame"] - merged_segments[-1]["start_frame"] + 1
-                    ) / fps
-                    merged_segments[-1]["duration_frames"] = (
-                        merged_segments[-1]["end_frame"] - merged_segments[-1]["start_frame"] + 1
-                    )
-                    merged = True
-                else:
-                    merged_segments.append(motion_segment_list[i])
-                i += 1
-
-            motion_segment_list = merged_segments
-
-            # **如果没有发生合并，则停止循环**
-            if not merged:
-                break
-
-        # **合并第一个片段到后面，而不是删除**
-        if len(motion_segment_list) > 1 and motion_segment_list[0]["duration_frames"] < min_duration_frames:
-            print(f"🔄 合并第一个短片段到后一个: {motion_segment_list[0]}")
-            motion_segment_list[1]["start_frame"] = motion_segment_list[0]["start_frame"]
-            motion_segment_list[1]["duration_sec"] = (
-                motion_segment_list[1]["end_frame"] - motion_segment_list[1]["start_frame"] + 1
-            ) / fps
-            motion_segment_list[1]["duration_frames"] = (
-                motion_segment_list[1]["end_frame"] - motion_segment_list[1]["start_frame"] + 1
-            )
-            motion_segment_list.pop(0)  # 删除第一个片段（已合并）
-
-        refined_segments.extend(motion_segment_list)
-
-    # **合并相邻相同姿势+motion_state**
-    final_segments = []
-    for segment in refined_segments:
-        if final_segments and (
-            final_segments[-1]["orient"] == segment["orient"]
-            and final_segments[-1]["motion_state"] == segment["motion_state"]
-        ):
-            # **合并到前一个相同姿势+motion_state 片段**
-            final_segments[-1]["end_frame"] = segment["end_frame"]
-            final_segments[-1]["duration_sec"] = (
-                final_segments[-1]["end_frame"] - final_segments[-1]["start_frame"] + 1
-            ) / fps
-            final_segments[-1]["duration_frames"] = (
-                final_segments[-1]["end_frame"] - final_segments[-1]["start_frame"] + 1
-            )
-        else:
-            final_segments.append(segment)
-
-    return final_segments
-
 def split_head_y_by_orientation(orientation_segments, head_y):
     """
     根据 orientation_segments 的 start_frame 和 end_frame，分割 head_y。
@@ -907,47 +793,6 @@ def split_head_y_by_orientation(orientation_segments, head_y):
         segmented_head_y.append(head_y_segment)
     
     return segmented_head_y
-
-
-    """
-    绘制 head_y 数组中 Y 轴高度的变化折线图。
-    :param head_y: 每个元素是一个数值，表示某个时间点的中心高度。
-    :param orientation_durations: 姿势段的时间范围，包含 start_frame 和 end_frame。
-    """
-    if not head_y:
-        print("错误: head_y 为空，无法绘制图表。")
-        return
-    
-    if not orientation_durations:
-        print("错误: orientation_durations 为空，无法确定绘制区间。")
-        return
-    
-    # 计算姿势的整体时间区间
-    start_frame = min(seg["start_frame"] for seg in orientation_durations)
-    end_frame = max(seg["end_frame"] for seg in orientation_durations)
-    
-    # 确保索引在合理范围内
-    start_frame = max(0, start_frame)
-    end_frame = min(len(head_y) - 1, end_frame)
-    
-    # 替换 None 值为 NaN，以保持数据长度一致
-    filtered_head_y = [head_y[i] if head_y[i] is not None else np.nan for i in range(start_frame, end_frame + 1)]
-    
-    # 线性插值填充 None（可选，如果你希望图表更加平滑）
-    filtered_head_y = pd.Series(filtered_head_y).interpolate(method='linear').tolist()
-    
-    # 生成 x 轴数据（时间步）
-    x_values = np.arange(start_frame, end_frame + 1)  # 确保 x 轴数据长度一致
-    
-    # 绘制折线图
-    plt.figure(figsize=(10, 5))
-    plt.plot(x_values, filtered_head_y, marker='o', markersize=3, linestyle='-', color='b', label='Height Variation')
-    plt.xlabel("Frame Index")
-    plt.ylabel("Height (y-coordinate)")
-    plt.title("Head Height Variation Over Time")
-    plt.legend()
-    plt.grid()
-    plt.show()
 
 def plot_combined_single_axis(head_y, orientation_durations):
     """在同一张图上绘制高度变化和姿势变化区域，并在Static片段覆盖交叉线"""
@@ -1061,12 +906,11 @@ def process_segmented_head_y(segmented_head_y, frame_window=400, max_timestamps=
             segment = np.array(segment, dtype=float)
 
             # ✅ 1. 计算阈值（自适应计算）
-            threshold_1 = compute_adaptive_threshold(segment, "std", 2)
-            threshold_2 = compute_adaptive_threshold(segment, "std", 1)
+            threshold= compute_adaptive_threshold(segment, "std", 1)
 
             # ✅ 2. 检测突变点
             algo = rpt.Pelt(model="l2").fit(segment)
-            change_points = algo.predict(pen=3)  # 获取突变点
+            change_points = algo.predict(pen=1)  # 获取突变点
 
             # ✅ 3. 处理突变点
             invalid_indices = set()
@@ -1077,19 +921,19 @@ def process_segmented_head_y(segmented_head_y, frame_window=400, max_timestamps=
                 if cp < frame_window:  # 在前400帧
                     before_mean = np.mean(segment[:cp])
                     after_mean = np.mean(segment[cp:cp + frame_window])
-                    if abs(after_mean - before_mean) > threshold_2:
+                    if abs(after_mean - before_mean) > threshold:
                         invalid_indices.update(range(0, cp + frame_window))
 
                 elif cp > len(segment) - frame_window:  # 在后400帧
                     before_mean = np.mean(segment[cp - frame_window:cp])
                     after_mean = np.mean(segment[cp:])
-                    if abs(after_mean - before_mean) > threshold_2:
+                    if abs(after_mean - before_mean) > threshold:
                         invalid_indices.update(range(cp - frame_window, len(segment)))
 
                 else:  # 在中间部分
                     before_mean = np.mean(segment[cp - frame_window:cp])
                     after_mean = np.mean(segment[cp:cp + frame_window])
-                    if abs(after_mean - before_mean) > threshold_2:
+                    if abs(after_mean - before_mean) > threshold:
                         timestamps.append(cp)  # 添加定位戳
                         middle_timestamps.append(cp)  # 只把中间的突变点存入
 
@@ -1371,7 +1215,7 @@ def plot_orientation_segments(orientation_segments):
 # ========================= 6. 运行主程序 =========================
 if __name__ == "__main__":
 
-    filename="output_data11.json"
+    filename="output_data10.json"
     fps, people_counts, body_height, orientation, head_y, motion_states = load_json_data(filename)
     
 
