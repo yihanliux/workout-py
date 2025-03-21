@@ -18,11 +18,6 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.5
 )
 
-# 滑动窗口存储最近 10 帧的关键点数据
-pose_history = []
-SIMILARITY_THRESHOLD = 0.05  # 归一化后的坐标，阈值较小
-STATIC_THRESHOLD_COUNT = 7  # 过去 10 帧中至少 7 帧相似，则判定为静态
-
 # 关键点索引
 NOSE, LEFT_EAR, RIGHT_EAR, LEFT_MOUTH, RIGHT_MOUTH = 0, 7, 8, 9, 10
 LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
@@ -61,67 +56,6 @@ def detect_people(image):
     """YOLO 检测人数"""
     results = model(image, verbose=False)
     return sum(int(box.cls) == 0 for box in results[0].boxes)
-
-def normalize_landmarks(cx_list, cy_list):
-    """ 归一化关键点坐标，相对于骨盆中心，并按骨盆到肩膀距离缩放 """
-    cx_array = np.array(cx_list, dtype=np.float32)
-    cy_array = np.array(cy_list, dtype=np.float32)
-
-    # 确保关键点数量正确
-    if len(cx_array) < 33 or len(cy_array) < 33:
-        return None  # 避免关键点缺失导致错误
-
-    # 计算骨盆中心（点 23 和 24 的中点）
-    pelvis_x = (cx_array[23] + cx_array[24]) / 2
-    pelvis_y = (cy_array[23] + cy_array[24]) / 2
-
-    # 计算肩膀中心（点 11 和 12 的中点）
-    shoulder_x = (cx_array[11] + cx_array[12]) / 2
-    shoulder_y = (cy_array[11] + cy_array[12]) / 2
-
-    # 计算骨盆到肩膀的距离，作为归一化尺度
-    scale_factor = np.linalg.norm([shoulder_x - pelvis_x, shoulder_y - pelvis_y])
-
-    if scale_factor == 0:
-        return None  # 避免除零错误
-
-    # 归一化关键点
-    norm_cx = (cx_array - pelvis_x) / scale_factor
-    norm_cy = (cy_array - pelvis_y) / scale_factor
-
-    return np.column_stack((norm_cx, norm_cy))
-
-def compute_similarity(current, previous):
-    """计算两帧之间的相似度，使用归一化后的欧几里得距离"""
-    if current is None or previous is None:
-        return float('inf')
-    
-    distances = np.linalg.norm(current - previous, axis=1)  # 计算 33 个关键点的欧几里得距离
-    return np.mean(distances)  # 取平均值作为全局相似度
-
-def determine_motion_state(current_pose):
-    """判断当前帧是静态还是动态"""
-    global pose_history
-
-    if len(pose_history) == 0:
-        pose_history.append(current_pose)  # 存入第一帧，避免后续出错
-        return "Not classified"
-
-    # 计算当前帧与过去帧的相似度
-    similarity_scores = [compute_similarity(current_pose, past_pose) for past_pose in pose_history]
-    
-    # 计算过去 10 帧中，有多少帧相似度小于阈值
-    static_count = sum(score < SIMILARITY_THRESHOLD for score in similarity_scores)
-
-    # 过去 10 帧中至少 STATIC_THRESHOLD_COUNT 帧相似，则判定为静态
-    motion_state = "Static" if static_count >= STATIC_THRESHOLD_COUNT else "Dynamic"
-
-    # 更新滑动窗口，最多保留 10 帧
-    pose_history.append(current_pose)
-    if len(pose_history) > 10:
-        pose_history.pop(0)
-
-    return motion_state
 
 def euclidean_dist(x1, y1, x2, y2):
     """计算两个点之间的欧几里得距离"""
@@ -187,7 +121,7 @@ def calculate_head_y(cy_list, body_height):
 
     return head_y
 
-def analyze_orientation(cx_list, cy_list, body_height):
+def analyze_orientation(cx_list, cy_list):
     """
     计算鼻子-左右耳的连线角度，以判断头部姿态（0-180°）。
 
@@ -215,24 +149,29 @@ def analyze_orientation(cx_list, cy_list, body_height):
     # 计算平均角度
     avg_angle = (angle_left + angle_right) / 2
 
-    d_ear_x = abs(cx_list[RIGHT_EAR] - cx_list[LEFT_EAR])
-    threshold = 0.02 * body_height
+    # d_ear_x = abs(cx_list[RIGHT_EAR] - cx_list[LEFT_EAR])
+    # threshold = 5
+
+    dy_mouth = (cy_list[LEFT_MOUTH] + cy_list[RIGHT_MOUTH])/2
 
     # 根据角度分类姿态
     if 40 <= avg_angle <= 100:
-        if  d_ear_x < threshold:
-            if  d_ear_x > cx_list[NOSE]:
-                return "left", d_ear_x
-            else: 
-                return "right", d_ear_x
+        # if  d_ear_x < threshold:
+        #     if  d_ear_x > cx_list[NOSE]:
+        #         return "left", d_ear_x
+        #     else: 
+        #         return "right", d_ear_x
+        # else:
+        if cy_list[NOSE] > dy_mouth:
+            return "down"
         else:
-            return "neutral", d_ear_x
+            return "neutral"
     elif 0 <= avg_angle <= 40:
-        return "down" , avg_angle
+        return "down" 
     elif 100 <= avg_angle <= 180:
-        return "up", avg_angle
+        return "up"
     else:
-        return "unknown", avg_angle
+        return "unknown"
 
 def process_pose(image):
     """处理人体姿态，返回关键点坐标，如果数据缺失则直接返回 'Insufficient data'"""
@@ -264,10 +203,8 @@ def process_pose(image):
     # 关键点完整性检查
     if any(cx_list[p] is None or cy_list[p] is None for p in required_points):
         return "Insufficient data"
-    
-    norm_list = normalize_landmarks(cx_list, cy_list)
 
-    return cx_list, cy_list, norm_list
+    return cx_list, cy_list
 
 def process_frame(image):
     """处理单帧图像，并返回 JSON 记录"""
@@ -291,24 +228,19 @@ def process_frame(image):
     if pose_data == "Insufficient data":
         draw_text(image, 'No Person', (25, 200))
     else:
-        cx_list, cy_list , norm_list= pose_data
+        cx_list, cy_list = pose_data
 
         body_height = calculate_body_height(cx_list, cy_list)
         frame_data.update({"body_height": body_height})
         draw_text(image, f'Body Height: {body_height}', (25, 200))
 
-        orientation, avg_angle = analyze_orientation(cx_list, cy_list, body_height)
+        orientation = analyze_orientation(cx_list, cy_list)
         frame_data.update({"orientation": orientation})
         draw_text(image, f'Orientation: {orientation}', (25, 300))
-        draw_text(image, f'avg_angle: {avg_angle}', (25, 500))
 
         head_y = calculate_head_y(cy_list, body_height)
         frame_data.update({"head_y": head_y})
         draw_text(image, f'Head Height: {head_y}', (25, 400))
-
-        motion_state = determine_motion_state(norm_list)
-        frame_data.update({"motion_state": motion_state})
-        draw_text(image, f'Motion State: {motion_state}', (25, 600))
     
     return image, frame_data
 
