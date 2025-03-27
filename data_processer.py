@@ -9,6 +9,13 @@ from scipy.signal import find_peaks
 from scipy.signal import savgol_filter
 import statsmodels.api as sm
 from PIL import Image
+import os
+from matplotlib.patches import Rectangle
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from matplotlib.colors import to_rgb, to_hex
+from collections import defaultdict
+from matplotlib.patches import FancyBboxPatch
+
 
 
 def load_json_data(filename):
@@ -507,7 +514,10 @@ def merge_alternating_orients(orientation_segments, fps=30, max_swaps=15, min_du
                 
                 # **如果交替切换次数超过 `max_swaps`，合并这些片段**
                 if swap_count > max_swaps:
-                    combined_orient = f"{current_orient}-{next_orient}"  # 组合方向
+                    if len(current_orient) > len(next_orient):
+                        combined_orient = f"{current_orient}-{next_orient}"
+                    else: 
+                        combined_orient = f"{next_orient}-{current_orient}"  # 组合方向
                     merged_segment = {
                         'orient': combined_orient,
                         'start_frame': combined_segments[0]['start_frame'],
@@ -1313,45 +1323,72 @@ def plot_orientation_segments(orientation_segments):
     # **显示图像**
     plt.show()
 
-def plot_orientation_segments_with_images(orientation_segments):
+def plot_orientation_segments(orientation_segments, save_path):
+    """
+    绘制 `head_y` 变化（基于 `orientation_segments["head_y"]`）并填充片段下方的区域，
+    处理片段间断点，并在 `Static` 片段上覆盖交叉线，同时标注 `orient` 方向。
+
+    参数：
+        orientation_segments (list[dict]): 姿态片段列表，每个字典包含：
+            - "start_frame": 片段起始帧索引。
+            - "end_frame": 片段结束帧索引。
+            - "head_y": 头部高度 (单值或 `[min, max]` 区间)。
+            - "orient": 姿势方向（如 "neutral", "right", "up", "down"）。
+
+    返回：
+        None: 直接在 `matplotlib` 画布上绘制图像，不返回值。
+    """
+
     if not orientation_segments:
         print("错误: orientation_segments 为空，无法绘制图表。")
         return
+    
+    try:
+        # 读取图片
+        # 读取图片
+        left_img_path = os.path.join(IMAGE_FOLDER, 'full_body.png') 
+        left_img = Image.open(left_img_path)
+        img_width, img_height = left_img.size
+        aspect_ratio = img_width / img_height
+        print(f"✅ 图片加载成功: {left_img_path} (宽: {img_width}, 高: {img_height})")
+    except Exception as e:
+        print(f"❌ 图片加载失败: {e}")
+        return
+    
+    
+    target_width_px, target_height_px = 1000, 600
+    dpi = 100  # 每英寸的像素点数
+    # 转换为英寸
+    fig_width, fig_height = target_width_px / dpi, target_height_px / dpi
+    # 创建图形
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    original_position = ax.get_position()  # 获取 ax 的位置信息
+    new_position = [original_position.x0 + 0.05, original_position.y0,
+                original_position.width, original_position.height]
+    ax.set_position(new_position)
 
-    plt.figure(figsize=(12, 6))
-
-    # **颜色映射**
+    # **定义颜色映射**
     color_map = {
         'neutral': '#8dd3c7',
         # 'right': '#ffffb3',
         'up': '#fb8072',
         'down': '#bebada',
-        'down-neutral': '#fdb462',
         'neutral-down': '#fdb462',
-        'up-neutral': '#b3de69',
         'neutral-up': '#b3de69',
         'down-up': '#fccde5',
-        'up-down': '#fccde5'
     }
 
-    # **图像映射**
-    image_map = {
-        "neutral": "neutral.png",
-        "right": "right.png",
-        "left": "left.png",
-        "up": "up.png",
-        "down": "down.png"
-    }
-
-    ax = plt.gca()  # 获取当前的 Axes 以放置图片
-
+    # **遍历 orientation_segments，绘制 head_y 轨迹**
     for entry in orientation_segments:
         start_time = entry["start_frame"]
         end_time = entry["end_frame"]
         head_y = entry["head_y"]
         orient = entry["orient"]
 
+        # **获取颜色**
         color = color_map.get(orient, 'gray')
+
+        # **生成 x 轴数据**
         x_values = np.arange(start_time, end_time + 1)
 
         # **生成 y 轴数据**
@@ -1386,50 +1423,99 @@ def plot_orientation_segments_with_images(orientation_segments):
         else:
             continue  # **数据格式错误，跳过**
 
-        # **填充曲线下方的区域**
-        plt.fill_between(x_values, y_values, 0, color=color, alpha=0.5, label=orient if orient not in plt.gca().get_legend_handles_labels()[1] else "")
+        plt.plot(x_values, y_values, color=color, linewidth=2, label=orient if orient not in plt.gca().get_legend_handles_labels()[1] else "")
         
-        # **计算中点坐标**
+        # plt.fill_between(x_values, y_values, 0, color=color, alpha=0.3, label=orient if orient not in plt.gca().get_legend_handles_labels()[1] else "")
+        
+        # 计算增强后的颜色，使其更加鲜艳
+        enhance_factor = 0.5  # 可以调整这个值来改变增强效果
+        original_color = np.array(to_rgb(color))
+        enhanced_color = original_color + (1 - original_color) * enhance_factor
+
+        white_color = np.array([1, 1, 1])  # 白色
+
+        # 先画底色填充区域 (开始是增强的颜色)
+        plt.fill_between(x_values, y_values, 0, color=to_hex(enhanced_color))
+
+        # 设置分层数量
+        max_y = max(y_values)
+        slice_size = 1 / 50  # 每次减少的值
+        num_slices = int(max_y / slice_size) + 1  # 用整数除法并加1确保全覆盖
+        delta_color = (white_color - enhanced_color) / num_slices  # 渐变步长
+
+        current_y_values = y_values.copy()
+
+        for slice_index in range(num_slices):
+            # 计算新的颜色逐步变为白色
+            current_color = enhanced_color + delta_color * slice_index
+            current_color = np.clip(current_color, 0, 1)
+            hex_color = to_hex(current_color)
+
+            max_y = max(current_y_values)
+            new_y_values = np.where(current_y_values > (max_y - slice_size), max_y - slice_size, current_y_values)
+            
+            # 只在值减少的情况下绘制
+            if np.any(new_y_values < current_y_values):
+                plt.fill_between(x_values, new_y_values, 0, color=hex_color)
+                current_y_values = new_y_values
+
+        # **在 orientation 片段顶部标注 orient**
         mid_x = (start_time + end_time) / 2
-        mid_y = max(y_values) + 0.05  
-
-        # **加载并添加图片**
-        orientations = orient.split("-")  # **拆分多个方向**
-        y_offset_step = 0.1  # **垂直偏移步长**
-
-        for i, single_orient in enumerate(orientations):
-            if single_orient in image_map:
-                img_path = image_map[single_orient]
-                try:
-                    img = mpimg.imread(img_path)  # 读取图片
-                    imagebox = OffsetImage(img, zoom=0.03)  # 控制图片缩放比例
-                    y_offset = mid_y + i * y_offset_step  # **按顺序排列**
-                    ab = AnnotationBbox(imagebox, (mid_x, y_offset), frameon=False, xycoords='data')
-                    ax.add_artist(ab)  # **添加图片到 Axes**
-                except FileNotFoundError:
-                    print(f"警告: 找不到 {img_path}, 跳过该标注")
-
-    # **设置 ylim，确保有足够的空间显示图片**
+        mid_y = max(y_values) + 0.03  # **让文本稍微高于曲线**
+        if '-' in orient:  # 如果是连接词
+            word1, word2 = orient.split('-')
+            plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
+            plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
+        else:  # 如果是单词
+            plt.text(mid_x, mid_y, orient, fontsize=12, ha='center', va='bottom', color='black')
+     
     # **添加图例、标签、网格**
+    plt.rcParams['font.family'] = 'Segoe UI'
     plt.ylim(0, 1.1)
-    plt.xlabel("Frame Index")
-    plt.ylabel("Head Height")
-    plt.title("Head Height and Facial Orientation Over Time")
-    plt.legend(prop={'family': 'Arial'})
-    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.xlabel("Frame Index", fontsize=14)
+    plt.ylabel("Nose Height (Normalized)", fontsize=14)
+    # ax.get_yaxis().set_visible(False)
+    ax.yaxis.set_ticks([])
+    ax.set_xlim(left=0)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    # plt.legend(loc='center left', bbox_to_anchor=(1.01, 0.8), fontsize=12, labelspacing=1.5)
 
-    # **显示图像**
-    plt.show()
+    # ax.xaxis.set_major_locator(plt.MultipleLocator(1000))  # 每 10 单位画一条竖线
+    max_x = orientation_segments[-1]["end_frame"]
+    for step_size in [1000, 2000, 3000, 4000, 5000]:
+        if (max_x / step_size) <= 15:  # 确保总共的刻度线数量不超过 15 条
+            break
+    ax.xaxis.set_major_locator(plt.MultipleLocator(step_size))
+    ax.yaxis.set_major_locator(plt.MultipleLocator(0.2))  # 每 0.05 单位画一条横线
+    ax.grid(True, which='both', linestyle='--', alpha=0.3)
 
-def analyze_video_orientation(orientation_segments):
+
+    # 在左侧添加图片
+    target_height =  0.72
+    target_width = target_height * aspect_ratio
+    ax_img = fig.add_axes([0.03, 0.1, target_width, target_height], anchor='W')  # 确保图片的高度与 0-1 对齐
+    ax_img.imshow(left_img)
+    ax_img.axis('off')
+    ax_img.set_zorder(0)
+
+    # 保存图像到指定路径
+    plt.savefig(save_path)
+    plt.close(fig)
+
+def analyze_video_orientation(orientation_segments, fps):
     total_frames = 0
     standing_frames = 0
-    up_frames = 0
     down_frames = 0
     transitions_count = 0  # Count of transitions
+    total_low_frames = 0  # Total frames where head_y <= 0.6
+    store_frames = 0
 
     # Track the previous state (None means uninitialized)
     previous_state = None  # Can be 'high' (>0.8), 'low' (<0.6), or None
+    store_state = None
 
     for segment in orientation_segments:
         head_y = segment['head_y']
@@ -1449,60 +1535,229 @@ def analyze_video_orientation(orientation_segments):
                 standing_frames += duration_frames
             else:
                 current_state = 'low'
+                total_low_frames += duration_frames
+                if orient == 'down' or ('down' in orient.split('-')):
+                    down_frames += duration_frames
+                
         elif isinstance(head_y, list) and len(head_y) == 2:  # List of two values case
             if all(value > 0.6 for value in head_y):
                 current_state = 'high'
                 standing_frames += duration_frames
-            elif all(value < 0.6 for value in head_y):
+            else:
                 current_state = 'low'
+                total_low_frames += duration_frames
+                if orient == 'down' or ('down' in orient.split('-')):
+                    down_frames += duration_frames
 
         # Check if there is a transition from high to low or low to high
         if previous_state and current_state and previous_state != current_state:
             transitions_count += 1
-        
+            store_state = previous_state
+            store_frames = total_frames
         # Update previous state
         if current_state:
             previous_state = current_state        
 
-        # Count 'up' and 'down' orientation frames (considering '-' separator)
-        if 'up' in orient.split('-'):
-            up_frames += duration_frames
-        elif 'down' in orient.split('-'):
-            down_frames += duration_frames
-
     # Calculate ratios
     standing_ratio = standing_frames / total_frames if total_frames > 0 else 0
-    up_ratio = up_frames / total_frames if total_frames > 0 else 0
-    down_ratio = down_frames / total_frames if total_frames > 0 else 0
-    up_down_ratio = (up_frames + down_frames) / total_frames if total_frames > 0 else 0
+    down_ratio = down_frames / total_low_frames if total_low_frames > 0 else 0
 
     # Generate result sentences
-    results = []
+    image = []
+    segment1 = ""
+    segment2 = ""
+    segment3 = ""
+    segment4 = ""
     if standing_ratio > 0.8:
-        results.append("这个视频中大部分都是站立的动作，建议把播放设备放置在支架上。")
-        results.append("建议把播放设备放在瑜伽垫长边前方较远的位置。")
-    elif transitions_count > 2 :
-        results.append("这个视频动作类型较为分散，可能需要多次调整播放设备")
+        segment1 = "Height: On Stand"
+        segment2 = "The video features standing movements for more than **80%** of its duration. It is recommended to place the playback device on a stand for optimal viewing."
+        segment3 = "Orientation: Long Edge Side"
+        segment4 = "It is recommended to place the device on one side of the long edge of the yoga mat."
+        image.append(1)
+    elif transitions_count > 1 :
+        segment1 = "Height: > 2 Changes"
+        segment2 = "Multiple adjustments to the playback device's height are required."
+        segment3 = "Orientation: > 2 Changes"
+        segment4 = "Multiple adjustments to the playback device's horizontal position are required."
+    elif transitions_count == 1 :
+        segment1 = "Height: 1 Change"
+        minutes = round(store_frames / fps / 60)
+        if store_state == 'high':
+            segment2 = f"The first {minutes} minutes of this video consist of standing movements, so it is recommended to place the playback device on a stand. The later part features non-standing movements, for which it is advisable to place the playback device on the floor."
+            if down_ratio > 0.8:
+                segment3 = "Orientation: 1 Changes"
+                segment4 = "It is recommended to place the device along the long edge of the yoga mat at first, and later along the short edge."
+                image.append(1)
+                image.append(3)
+            else:
+                segment3 = "Orientation: Long Edge Side"
+                segment4 = "It is recommended to place the device along the long edge of the yoga mat."
+                image.append(1)
+                image.append(2)
+        else:
+            segment2 = f"The first {minutes} minutes of this video consist of non-standing movements, so it is recommended to place the playback device on the floor. The later part features standing movements, for which it is advisable to place the playback device on a stand."
+            if down_ratio > 0.8:
+                segment3 = "Orientation: 1 Changes"
+                segment4 = "It is recommended to place the device on one side of the short edge of the yoga mat."
+                image.append(3)
+                image.append(1)
+            else:
+                segment3 = "Orientation: Long Edge Side"
+                segment4 = "It is recommended to place the device along the long edge of the yoga mat."
+                image.append(2)
+                image.append(1)
     else:
-        if up_ratio > 0.8:
-            # results.append("这个视频中大部分动作都是非站姿，建议把播放设备放置在地板上。")
-            results.append("这个视频中大部分的动作都是躺姿，视线会自然的朝向天花板，建议把播放设备放在瑜伽垫的短边，脚的一侧。")
-        elif down_ratio > 0.8:
-            # results.append("这个视频中大部分动作都是非站姿，建议把播放设备放置在地板上。")
-            results.append("这个视频中大部分的动作都是俯姿，视线会自然的朝向地板，建议把播放设备放在瑜伽垫的短边，头的一侧。")
-        elif up_down_ratio > 0.8:
-            # results.append("这个视频中大部分动作都是非站姿，建议把播放设备放置在地板上。")
-            results.append("这个视频中大部分的动作都是俯姿或躺姿，建议把播放设备放在瑜伽垫的长边，靠近头的位置。")
+        segment1 = "Height: Floor Level"
+        segment2 = "All of the video's duration features non-standing movements, so it is recommended to place the playback device on the floor."
+        if down_ratio > 0.8:
+            segment3 = "Orientation: Short Edge Side"
+            segment4 = ("It is recommended to place the device on one side of the short edge of the yoga mat.")
+            image.append(3)
+        else:
+            segment3 = "Orientation: Long Edge Side"
+            segment4 = ("It is recommended to place the device on one side of the long edge of the yoga mat.")
+            image.append(2)
+
+    segments = {
+        "Segment1": segment1,
+        "Segment2": segment2,
+        "Segment3": segment3,
+        "Segment4": segment4,
+    }
+
+    return segments, image
+
+def cal_abs_value(num1, num2):
+    return num1 / num2
+
+def plot_orientation_bar_chart(orientation_segments, save_path):
+    if not orientation_segments:
+        print("错误: orientation_segments 为空，无法绘制柱状图。")
+        return
+
+    # 收集每个 orient 的累计时间
+    orient_times = defaultdict(int)
+
+    for entry in orientation_segments:
+        start_time = entry["start_frame"]
+        end_time = entry["end_frame"]
+        orient = entry["orient"]
+        duration = end_time - start_time + 1
+
+        orient_times[orient] += duration
+
+    total_frames = orientation_segments[-1]["end_frame"]
+    sorted_orients = sorted(orient_times.items(), key=lambda x: x[1], reverse=False)
+    orients = [item[0] for item in sorted_orients]
+    times = [item[1] for item in sorted_orients]
+    percentages = [round((time / total_frames) * 100) for time in times]
+
+    # 定义颜色映射
+    color_map = {
+        'neutral': '#8dd3c7',
+        'up': '#fb8072',
+        'down': '#bebada',
+        'neutral-down': '#fdb462',
+        'neutral-up': '#b3de69',
+        'down-up': '#fccde5',
+    }
+    colors = [color_map.get(orient, 'gray') for orient in orients]
+
+    bar_height = 100
+    bar_spacing = 40
+
+    target_width_px = 1000
+    if len(orients) == 1 :
+        target_height_px =  bar_height + 20
+    else: 
+        target_height_px = bar_height * len(orients) + bar_spacing * (len(orients) - 1) + 20
+    dpi = 100
+    fig_width, fig_height = target_width_px / dpi, target_height_px / dpi
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    original_position = ax.get_position()  # 获取 ax 的位置信息
+    new_position = [original_position.x0 + 0.01, original_position.y0 + 0.05,
+                original_position.width, original_position.height]
+    ax.set_position(new_position)
+
+
+    plt.rcParams['font.family'] = 'Segoe UI'
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.get_xaxis().set_visible(False)
+
+
+    y_positions = []
+
+    for i, (orient_name, color) in enumerate(zip(orients, colors)):
+        y_pos1 = cal_abs_value(10 + i * (bar_height + bar_spacing), target_height_px)
+        y_pos2 = cal_abs_value(10 + i * (bar_height + bar_spacing) + 10, target_height_px)
+        y_pos3 = cal_abs_value(10 + i * (bar_height + bar_spacing) + 50, target_height_px)
+        y_positions.append(cal_abs_value(60 + i * (bar_height + bar_spacing), target_height_px))
+
+        fancy_box = FancyBboxPatch(
+            xy=(0.02, y_pos1),               # 矩形的左下角位置
+            width=0.9,                   # 宽度
+            height=cal_abs_value(bar_height, target_height_px), 
+            boxstyle="round,pad=0.01",      # 矩形样式为圆角，带有内边距        
+            facecolor=color,       # 填充颜色
+            linewidth=0,                 # 边框宽度
+            mutation_scale=1.5,          # 圆角的缩放比例
+            alpha=0.3                    # 透明度
+        )
+        ax.add_patch(fancy_box)
+        # ax.text(0.9, y_pos3, times[i], fontsize=14, ha='center', va='center', color=color)
+
+        fancy_box = FancyBboxPatch(
+            xy=(0.02, y_pos2),               # 矩形的左下角位置
+            width=cal_abs_value(times[i], total_frames) * 0.9,  
+            height=cal_abs_value(bar_height*0.8, target_height_px),                  # 高度
+            boxstyle="round,pad=0.01",   # 矩形样式为圆角，带有内边距
+            facecolor=color,       # 填充颜色
+            linewidth=0,                 # 边框宽度
+            mutation_scale=1.5,          # 圆角的缩放比例
+            alpha= 1                  # 透明度
+        )
+        # ax.text(cal_abs_value(times[i], total_frames) * 0.9 + 0.08, y_pos3, f'{percentages[i]}%', fontsize=14, ha='center', va='center', color="black")
+        ax.text(0.9, y_pos3, f'{percentages[i]}%', fontsize=14, ha='center', va='center', color=color)
+        ax.add_patch(fancy_box)
+
+            # 添加图片
+        images_to_add = []
+        if '-' in orient_name:
+            words = orient_name.split('-')
+            images_to_add = words  # 分割后的每个单词都代表一个图片
+        else:
+            images_to_add = [orient_name]  # 单个词标签
         
-            
+        # 添加图片
+        for i, word in enumerate(images_to_add):
+            image_path = os.path.join(IMAGE_FOLDER, f'{word}.png')
+            if os.path.exists(image_path):  # 确保图片存在
+                img = Image.open(image_path)
+                imagebox = OffsetImage(img)
+                if len(images_to_add) == 1:
+                    ab = AnnotationBbox(imagebox, (0.05, y_pos3), 
+                                    frameon=False, xycoords='axes fraction')
+                else:
+                    ab = AnnotationBbox(imagebox, (0.05 + 0.08 * i, y_pos3), 
+                                    frameon=False, xycoords='axes fraction')
+                ax.add_artist(ab)
+        
 
-    return results
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(orients)
+    ax.tick_params(axis='y', labelsize=14)
 
+    # 保存并关闭图表
+    plt.savefig(save_path)
+    plt.close(fig)
 
 
 if __name__ == "__main__":
 
-    filename="output_data11.json"
+    filename="output_data5.json"
     fps, people_counts, body_height, orientation, head_y = load_json_data(filename)
     
 
@@ -1518,7 +1773,6 @@ if __name__ == "__main__":
 
     segmented_head_y = split_head_y_by_orientation(orientation_segments, head_y)
     segmented_head_y, split_info = process_segmented_head_y(segmented_head_y)
-    print(split_info)
 
     periodics = []
     means = []
@@ -1534,13 +1788,48 @@ if __name__ == "__main__":
         amps.append(amp)
     
     orientation_segments = split_orientation_segments(orientation_segments, segmented_head_y, split_info)
-    print(periodics)
     orientation_segments = update_orientation_segments(orientation_segments, periodics, means, amps)
 
-    results = analyze_video_orientation(orientation_segments)
-    print(results)
 
-    plot_orientation_segments(orientation_segments)
+    IMAGE_FOLDER = "MoveMate/static/images"
+    if not os.path.exists(IMAGE_FOLDER):
+        os.makedirs(IMAGE_FOLDER)
+
+    image_path_1 = os.path.join(IMAGE_FOLDER, 'result_plot_1.png')
+    image_path_2 = os.path.join(IMAGE_FOLDER, 'result_plot_2.png')
+    
+
+
+    plot_orientation_segments(orientation_segments, image_path_1)
+    plot_orientation_bar_chart(orientation_segments, image_path_2)
+    segments, image = analyze_video_orientation(orientation_segments, fps)
+    print(segments)
+
+
+
+    image_urls = {}
+    image_urls[f"image_url_1"] = "/" + image_path_1 if image_path_1 else None
+    image_urls[f"image_url_2"] = "/" + image_path_2 if image_path_2 else None
+    image_urls["image_url1"] = None
+    image_urls["image_url2"] = None
+    i = 1
+    for index, img in enumerate(image, start=1):  # 从1开始编号
+        if img == 1:
+            image_urls[f"image_url{i}"] = "/" + os.path.join(IMAGE_FOLDER, '1.png')
+            i += 1
+        elif img == 2:
+            image_urls[f"image_url{i}"] = "/" + os.path.join(IMAGE_FOLDER, '2.png')
+            i += 1
+        elif img == 3:
+            image_urls[f"image_url{i}"] = "/" + os.path.join(IMAGE_FOLDER, '3.png')
+
+    # 构建返回的 JSON 数据
+    response_data = {
+        "done": True
+    }
+    response_data.update(segments)
+    response_data.update(image_urls)  # 添加图片 URL 键值对
+
 
     # print(orientation_segments)
     
@@ -1719,3 +2008,140 @@ if __name__ == "__main__":
 #             segment['orient'] = 'neutral'
 
 #     return merged_segments
+
+
+ # 自定义图例位置
+    # legend_labels = list(labels_used)
+    # spacing_between_labels = 0.15  # 每个标签的上下距离增大
+    # legend_positions = [(1.03, 0.95 - i * spacing_between_labels) for i in range(len(legend_labels))] 
+
+    # for label, pos in zip(legend_labels, legend_positions):
+    #     color = color_map.get(label, 'gray')
+        
+    #     # 添加颜色矩形
+    #     rect = Rectangle((pos[0] - 0.015, pos[1] - 0.015), 0.01, 0.03, 
+    #                      transform=ax.transAxes, color=color, clip_on=False, alpha=0.5)
+    #     ax.add_patch(rect)
+        
+    #     # 添加标签文字
+    #     ax.text(pos[0], pos[1], label, transform=ax.transAxes, fontsize=12, va='center', ha='left')
+        
+    #     # 添加图片
+    #     images_to_add = []
+    #     if '-' in label:
+    #         words = label.split('-')
+    #         images_to_add = words  # 分割后的每个单词都代表一个图片
+    #     else:
+    #         images_to_add = [label]  # 单个词标签
+        
+    #     # 添加图片
+    #     for i, word in enumerate(images_to_add):
+    #         image_path = os.path.join(IMAGE_FOLDER, f'{word}.png')
+    #         if os.path.exists(image_path):  # 确保图片存在
+    #             img = Image.open(image_path)
+    #             imagebox = OffsetImage(img)
+    #             if len(images_to_add) == 1:
+    #                 ab = AnnotationBbox(imagebox, (pos[0] + 0.06 + 0.05 * i, pos[1]), 
+    #                                 frameon=False, xycoords='axes fraction')
+    #             else:
+    #                 ab = AnnotationBbox(imagebox, (pos[0] + 0.09 + 0.04 * i, pos[1]), 
+    #                                 frameon=False, xycoords='axes fraction')
+    #             ax.add_artist(ab)
+
+    # def plot_orientation_bar_chart(orientation_segments, save_path):
+#     if not orientation_segments:
+#         print("错误: orientation_segments 为空，无法绘制柱状图。")
+#         return
+
+#     # 收集每个 orient 的累计时间
+#     orient_times = defaultdict(int)
+
+#     for entry in orientation_segments:
+#         start_time = entry["start_frame"]
+#         end_time = entry["end_frame"]
+#         orient = entry["orient"]
+#         duration = end_time - start_time + 1
+
+#         orient_times[orient] += duration
+
+#     total_frames = orientation_segments[-1]["end_frame"]
+#     sorted_orients = sorted(orient_times.items(), key=lambda x: x[1], reverse=False)
+#     orients = [item[0] for item in sorted_orients]
+#     times = [item[1] for item in sorted_orients]
+#     percentages = [round((time / total_frames) * 100) for time in times]
+
+#     # 定义颜色映射
+#     color_map = {
+#         'neutral': '#8dd3c7',
+#         'up': '#fb8072',
+#         'down': '#bebada',
+#         'neutral-down': '#fdb462',
+#         'neutral-up': '#b3de69',
+#         'down-up': '#fccde5',
+#     }
+#     colors = [color_map.get(orient, 'gray') for orient in orients]
+
+#     # 创建图表
+#     target_width_px = 1000
+#     target_height_px = 120 * len(orients) + 50
+#     dpi = 100
+#     fig_width, fig_height = target_width_px / dpi, target_height_px / dpi
+#     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+#     original_position = ax.get_position()  # 获取 ax 的位置信息
+#     new_position = [original_position.x0 + 0.01, original_position.y0 + 0.05,
+#                 original_position.width, original_position.height]
+#     ax.set_position(new_position)
+
+
+#     plt.rcParams['font.family'] = 'Segoe UI'
+#     ax.spines['top'].set_visible(False)
+#     ax.spines['right'].set_visible(False)
+#     ax.spines['left'].set_visible(False)
+#     ax.spines['bottom'].set_visible(False)
+#     ax.get_xaxis().set_visible(False)
+
+#     target_height_px = 100
+#     data_height = fig_height * dpi
+#     spacing_factor = 1
+#     height_spacing = (target_height_px / data_height) * len(orients) * spacing_factor
+#     height  = height_spacing * 0.7
+
+#     y_poss = []
+
+#     for i, (orient_name, color) in enumerate(zip(orients, colors)):
+#         y_pos = float(i * height_spacing)
+#         y_poss.append(y_pos)
+#         rgba_color = np.array(to_rgb(color) + (0.2,))  # 添加透明度
+
+#         ax.barh(y_pos, total_frames, color=rgba_color, height=height)
+#         ax.barh(y_pos, times[i], color=color, height=height * 0.85)
+
+#         ax.text(times[i] * 1.05, y_pos, f'{percentages[i]}%',
+#                 va='center', ha='left', fontsize=14, color='black') 
+#         ax.text(total_frames * 0.92, y_pos, f'{times[i]}',
+#                 va='center', ha='left', fontsize=14, color=color)
+        
+#         # images = []
+#         # total_width = 0
+#         # for part in orient_name.split('-'):
+#         #     img_path = os.path.join(IMAGE_FOLDER, f'{part}.png')
+#         #     if os.path.exists(img_path):
+#         #         img = Image.open(img_path)
+#         #         images.append(img)
+#         #         total_width += img.width
+
+#         # if images:  # 如果有加载到的图片
+#         #     x_offset = -total_width - 5  # 放在柱子左边
+#         #     y_offset = y_pos - height / 2  # 用 i 而不是 y_pos
+#         #     for img in images:
+#         #         img_width, img_height = img.size
+#         #         ax.imshow(img, extent=[x_offset, x_offset + img_width, y_offset, y_offset + height], aspect='auto')
+#         #         x_offset += img_width
+
+#     ax.set_yticks(y_poss)
+#     ax.set_yticklabels(orients)
+#     ax.tick_params(axis='y', labelsize=14)
+
+#     # 保存并关闭图表
+#     plt.savefig(save_path)
+#     plt.close(fig)
