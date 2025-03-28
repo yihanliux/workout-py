@@ -1378,6 +1378,11 @@ def plot_orientation_segments(orientation_segments, save_path):
         'down-up': '#fccde5',
     }
 
+    previous_orient = None
+    accumulated_start_time = None
+    accumulated_end_time = None
+    accumulated_y_values = []
+
     # **遍历 orientation_segments，绘制 head_y 轨迹**
     for entry in orientation_segments:
         start_time = entry["start_frame"]
@@ -1459,16 +1464,54 @@ def plot_orientation_segments(orientation_segments, save_path):
                 plt.fill_between(x_values, new_y_values, 0, color=hex_color)
                 current_y_values = new_y_values
 
+
+        if previous_orient is None:  # 初始状态
+            accumulated_start_time = start_time
+            accumulated_end_time = end_time
+            accumulated_y_values = y_values
+        elif orient == previous_orient:  # 连续相同的 orient
+            accumulated_end_time = end_time
+            accumulated_y_values = np.concatenate((accumulated_y_values, y_values))
+        else:  # 不同的 orient，进行文本绘制
+            mid_x = (accumulated_start_time + accumulated_end_time) / 2
+            mid_y = max(accumulated_y_values) + 0.03
+
+            if '-' in previous_orient:  # 如果是连接词
+                word1, word2 = previous_orient.split('-')
+                plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
+                plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
+            else:  # 如果是单词
+                plt.text(mid_x, mid_y, previous_orient, fontsize=12, ha='center', va='bottom', color='black')
+
+            # 重置积累的值
+            accumulated_start_time = start_time
+            accumulated_end_time = end_time
+            accumulated_y_values = y_values
+
+        previous_orient = orient  # 更新当前的 orient
+
         # **在 orientation 片段顶部标注 orient**
-        mid_x = (start_time + end_time) / 2
-        mid_y = max(y_values) + 0.03  # **让文本稍微高于曲线**
-        if '-' in orient:  # 如果是连接词
-            word1, word2 = orient.split('-')
+        # mid_x = (start_time + end_time) / 2
+        # mid_y = max(y_values) + 0.03  # **让文本稍微高于曲线**
+        # if '-' in orient:  # 如果是连接词
+        #     word1, word2 = orient.split('-')
+        #     plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
+        #     plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
+        # else:  # 如果是单词
+        #     plt.text(mid_x, mid_y, orient, fontsize=12, ha='center', va='bottom', color='black')
+    
+    if previous_orient is not None:
+        mid_x = (accumulated_start_time + accumulated_end_time) / 2
+        mid_y = max(accumulated_y_values) + 0.03
+
+        if '-' in previous_orient:  
+            word1, word2 = previous_orient.split('-')
             plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
             plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
-        else:  # 如果是单词
-            plt.text(mid_x, mid_y, orient, fontsize=12, ha='center', va='bottom', color='black')
-     
+        else:
+            plt.text(mid_x, mid_y, previous_orient, fontsize=12, ha='center', va='bottom', color='black')
+
+
     # **添加图例、标签、网格**
     plt.rcParams['font.family'] = 'Segoe UI'
     plt.ylim(0, 1.1)
@@ -1476,7 +1519,7 @@ def plot_orientation_segments(orientation_segments, save_path):
     plt.ylabel("Nose Height (Normalized)", fontsize=14)
     # ax.get_yaxis().set_visible(False)
     ax.yaxis.set_ticks([])
-    ax.set_xlim(left=0)
+    # ax.set_xlim(left=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_visible(False)
@@ -1490,7 +1533,7 @@ def plot_orientation_segments(orientation_segments, save_path):
             break
     ax.xaxis.set_major_locator(plt.MultipleLocator(step_size))
     ax.yaxis.set_major_locator(plt.MultipleLocator(0.2))  # 每 0.05 单位画一条横线
-    ax.grid(True, which='both', linestyle='--', alpha=0.3)
+    ax.grid(True, which='major', axis='y', linestyle='--', alpha=0.3)
 
 
     # 在左侧添加图片
@@ -1757,7 +1800,7 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
 
 if __name__ == "__main__":
 
-    filename="output_data5.json"
+    filename="output_data8.json"
     fps, people_counts, body_height, orientation, head_y = load_json_data(filename)
     
 
