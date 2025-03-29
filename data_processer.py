@@ -1346,25 +1346,27 @@ def plot_orientation_segments(orientation_segments, save_path):
     try:
         # 读取图片
         # 读取图片
-        left_img_path = os.path.join(IMAGE_FOLDER, 'full_body.png') 
+        left_img_path = os.path.join(IMAGE_FOLDER, 'full_body.png')
         left_img = Image.open(left_img_path)
         img_width, img_height = left_img.size
         aspect_ratio = img_width / img_height
-        print(f"✅ 图片加载成功: {left_img_path} (宽: {img_width}, 高: {img_height})")
+        right_img_path = os.path.join(IMAGE_FOLDER, 'indicator.png')
+        right_img = Image.open(right_img_path)
     except Exception as e:
         print(f"❌ 图片加载失败: {e}")
         return
     
     
-    target_width_px, target_height_px = 1000, 600
+    target_width_px, target_height_px = 1280, 600
     dpi = 100  # 每英寸的像素点数
     # 转换为英寸
     fig_width, fig_height = target_width_px / dpi, target_height_px / dpi
     # 创建图形
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     original_position = ax.get_position()  # 获取 ax 的位置信息
-    new_position = [original_position.x0 + 0.05, original_position.y0,
+    new_position = [original_position.x0, original_position.y0,
                 original_position.width, original_position.height]
+    print(new_position)
     ax.set_position(new_position)
 
     # **定义颜色映射**
@@ -1378,10 +1380,13 @@ def plot_orientation_segments(orientation_segments, save_path):
         'down-up': '#fccde5',
     }
 
-    previous_orient = None
-    accumulated_start_time = None
-    accumulated_end_time = None
-    accumulated_y_values = []
+    # previous_orient = None
+    # accumulated_start_time = None
+    # accumulated_end_time = None
+    # accumulated_y_values = []
+
+    total_frames = orientation_segments[-1]["end_frame"]
+    weighted_sum = 0.0
 
     # **遍历 orientation_segments，绘制 head_y 轨迹**
     for entry in orientation_segments:
@@ -1389,6 +1394,8 @@ def plot_orientation_segments(orientation_segments, save_path):
         end_time = entry["end_frame"]
         head_y = entry["head_y"]
         orient = entry["orient"]
+
+        weight = (end_time - start_time + 1) / total_frames
 
         # **获取颜色**
         color = color_map.get(orient, 'gray')
@@ -1399,6 +1406,7 @@ def plot_orientation_segments(orientation_segments, save_path):
         # **生成 y 轴数据**
         if isinstance(head_y, (int, float)):  # **单值，绘制水平直线**
             y_values = np.full_like(x_values, head_y, dtype=float)
+            head_y_value = head_y
 
         elif isinstance(head_y, (list, tuple)) and len(head_y) == 2:  # **区间值，绘制振荡曲线**
             min_val, max_val = head_y
@@ -1407,6 +1415,7 @@ def plot_orientation_segments(orientation_segments, save_path):
 
             # 中间值 (起点与终点)
             mid_val = (min_val + max_val) / 2
+            head_y_value = mid_val
 
             # 计算每次往返占用的点数（两个来回为一组）
             points_per_oscillation = num_points // (num_oscillations * 4)
@@ -1427,7 +1436,9 @@ def plot_orientation_segments(orientation_segments, save_path):
                 
         else:
             continue  # **数据格式错误，跳过**
-
+        
+        weighted_sum += head_y_value * weight
+        
         plt.plot(x_values, y_values, color=color, linewidth=2, label=orient if orient not in plt.gca().get_legend_handles_labels()[1] else "")
         
         # plt.fill_between(x_values, y_values, 0, color=color, alpha=0.3, label=orient if orient not in plt.gca().get_legend_handles_labels()[1] else "")
@@ -1464,62 +1475,14 @@ def plot_orientation_segments(orientation_segments, save_path):
                 plt.fill_between(x_values, new_y_values, 0, color=hex_color)
                 current_y_values = new_y_values
 
-
-        if previous_orient is None:  # 初始状态
-            accumulated_start_time = start_time
-            accumulated_end_time = end_time
-            accumulated_y_values = y_values
-        elif orient == previous_orient:  # 连续相同的 orient
-            accumulated_end_time = end_time
-            accumulated_y_values = np.concatenate((accumulated_y_values, y_values))
-        else:  # 不同的 orient，进行文本绘制
-            mid_x = (accumulated_start_time + accumulated_end_time) / 2
-            mid_y = max(accumulated_y_values) + 0.03
-
-            if '-' in previous_orient:  # 如果是连接词
-                word1, word2 = previous_orient.split('-')
-                plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
-                plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
-            else:  # 如果是单词
-                plt.text(mid_x, mid_y, previous_orient, fontsize=12, ha='center', va='bottom', color='black')
-
-            # 重置积累的值
-            accumulated_start_time = start_time
-            accumulated_end_time = end_time
-            accumulated_y_values = y_values
-
-        previous_orient = orient  # 更新当前的 orient
-
-        # **在 orientation 片段顶部标注 orient**
-        # mid_x = (start_time + end_time) / 2
-        # mid_y = max(y_values) + 0.03  # **让文本稍微高于曲线**
-        # if '-' in orient:  # 如果是连接词
-        #     word1, word2 = orient.split('-')
-        #     plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
-        #     plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
-        # else:  # 如果是单词
-        #     plt.text(mid_x, mid_y, orient, fontsize=12, ha='center', va='bottom', color='black')
-    
-    if previous_orient is not None:
-        mid_x = (accumulated_start_time + accumulated_end_time) / 2
-        mid_y = max(accumulated_y_values) + 0.03
-
-        if '-' in previous_orient:  
-            word1, word2 = previous_orient.split('-')
-            plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
-            plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
-        else:
-            plt.text(mid_x, mid_y, previous_orient, fontsize=12, ha='center', va='bottom', color='black')
-
-
     # **添加图例、标签、网格**
     plt.rcParams['font.family'] = 'Segoe UI'
-    plt.ylim(0, 1.1)
-    plt.xlabel("Frame Index", fontsize=14)
-    plt.ylabel("Nose Height (Normalized)", fontsize=14)
+    plt.ylim(0, 1)
+    plt.xlabel("Frame Index", fontsize=12, color='#525252')
+    plt.ylabel("Nose Height (Normalized)", fontsize=12, color='#525252')
     # ax.get_yaxis().set_visible(False)
     ax.yaxis.set_ticks([])
-    # ax.set_xlim(left=0)
+    ax.set_xlim(left=0)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.spines['left'].set_visible(False)
@@ -1533,16 +1496,36 @@ def plot_orientation_segments(orientation_segments, save_path):
             break
     ax.xaxis.set_major_locator(plt.MultipleLocator(step_size))
     ax.yaxis.set_major_locator(plt.MultipleLocator(0.2))  # 每 0.05 单位画一条横线
+    ax.tick_params(axis='x', labelsize=10, labelcolor='#525252')
+    ax.tick_params(axis='y', labelsize=10, labelcolor='#525252')
     ax.grid(True, which='major', axis='y', linestyle='--', alpha=0.3)
 
 
     # 在左侧添加图片
-    target_height =  0.72
+    target_height =  0.78
     target_width = target_height * aspect_ratio
-    ax_img = fig.add_axes([0.03, 0.1, target_width, target_height], anchor='W')  # 确保图片的高度与 0-1 对齐
-    ax_img.imshow(left_img)
-    ax_img.axis('off')
-    ax_img.set_zorder(0)
+    ax_img1 = fig.add_axes([0.01, 0.1, target_width, target_height], anchor='W')  # 确保图片的高度与 0-1 对齐
+    ax_img1.imshow(left_img)
+    ax_img1.axis('off')
+    ax_img1.set_zorder(0)
+
+    # 获取图片的原始像素大小
+    img_width, img_height = right_img.size
+
+    # 获取 fig 的大小 (单位是英寸)
+    fig_width, fig_height = fig.get_size_inches()
+
+    # 将图片的像素尺寸转化为规范化坐标 (0-1 范围)
+    norm_width = img_width / (fig_width * fig.dpi)
+    norm_height = img_height / (fig_height * fig.dpi)
+    x0, y0, width, height = new_position
+    new_y = y0 + height * weighted_sum - 0.22 * height
+
+    # 添加第二个图片
+    ax_img2 = fig.add_axes([0.04, new_y, norm_width, norm_height], anchor='W')
+    ax_img2.imshow(right_img)
+    ax_img2.axis('off')
+    ax_img2.set_zorder(0)
 
     # 保存图像到指定路径
     plt.savefig(save_path)
@@ -1790,8 +1773,9 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
         
 
     ax.set_yticks(y_positions)
+    orients = [label.capitalize() for label in orients]
     ax.set_yticklabels(orients)
-    ax.tick_params(axis='y', labelsize=14)
+    ax.tick_params(axis='y', labelsize=14, labelcolor='#525252')
 
     # 保存并关闭图表
     plt.savefig(save_path)
@@ -1800,7 +1784,7 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
 
 if __name__ == "__main__":
 
-    filename="output_data8.json"
+    filename="output_data6.json"
     fps, people_counts, body_height, orientation, head_y = load_json_data(filename)
     
 
@@ -1883,7 +1867,51 @@ if __name__ == "__main__":
 
     
 
+#     if previous_orient is None:  # 初始状态
+    #         accumulated_start_time = start_time
+    #         accumulated_end_time = end_time
+    #         accumulated_y_values = y_values
+    #     elif orient == previous_orient:  # 连续相同的 orient
+    #         accumulated_end_time = end_time
+    #         accumulated_y_values = np.concatenate((accumulated_y_values, y_values))
+    #     else:  # 不同的 orient，进行文本绘制
+    #         mid_x = (accumulated_start_time + accumulated_end_time) / 2
+    #         mid_y = max(accumulated_y_values) + 0.03
 
+    #         if '-' in previous_orient:  # 如果是连接词
+    #             word1, word2 = previous_orient.split('-')
+    #             plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
+    #             plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
+    #         else:  # 如果是单词
+    #             plt.text(mid_x, mid_y, previous_orient, fontsize=12, ha='center', va='bottom', color='black')
+
+    #         # 重置积累的值
+    #         accumulated_start_time = start_time
+    #         accumulated_end_time = end_time
+    #         accumulated_y_values = y_values
+
+    #     previous_orient = orient  # 更新当前的 orient
+
+    #     # **在 orientation 片段顶部标注 orient**
+    #     # mid_x = (start_time + end_time) / 2
+    #     # mid_y = max(y_values) + 0.03  # **让文本稍微高于曲线**
+    #     # if '-' in orient:  # 如果是连接词
+    #     #     word1, word2 = orient.split('-')
+    #     #     plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
+    #     #     plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
+    #     # else:  # 如果是单词
+    #     #     plt.text(mid_x, mid_y, orient, fontsize=12, ha='center', va='bottom', color='black')
+    
+    # if previous_orient is not None:
+    #     mid_x = (accumulated_start_time + accumulated_end_time) / 2
+    #     mid_y = max(accumulated_y_values) + 0.03
+
+    #     if '-' in previous_orient:  
+    #         word1, word2 = previous_orient.split('-')
+    #         plt.text(mid_x, mid_y + 0.04, word1, fontsize=12, ha='center', va='bottom', color='black')
+    #         plt.text(mid_x, mid_y, f'&{word2}', fontsize=12, ha='center', va='bottom', color='black')
+    #     else:
+    #         plt.text(mid_x, mid_y, previous_orient, fontsize=12, ha='center', va='bottom', color='black')
 
 
 # body_height = smooth_body_height(body_height, fps)
