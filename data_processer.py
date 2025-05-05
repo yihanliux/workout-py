@@ -1307,7 +1307,7 @@ def plot_orientation_segments(orientation_segments):
     # **添加图例、标签、网格**
     plt.ylim(0, 1.1)
     plt.xlabel("Frame Index")
-    plt.ylabel("Nose Height (Normalized)")
+    plt.ylabel("Eye Height (Normalized)")
     plt.title("Nose Height and Facial Orientation Over Time")
     plt.legend(prop={'family': 'Arial'})
     plt.grid(True, linestyle='--', alpha=0.6)
@@ -1350,8 +1350,8 @@ def plot_orientation_segments(orientation_segments, save_path):
         left_img = Image.open(left_img_path)
         img_width, img_height = left_img.size
         aspect_ratio = img_width / img_height
-        right_img_path = os.path.join(IMAGE_FOLDER, 'indicator.png')
-        right_img = Image.open(right_img_path)
+        # right_img_path = os.path.join(IMAGE_FOLDER, 'indicator.png')
+        # right_img = Image.open(right_img_path)
     except Exception as e:
         print(f"❌ 图片加载失败: {e}")
         return
@@ -1364,20 +1364,20 @@ def plot_orientation_segments(orientation_segments, save_path):
     # 创建图形
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     original_position = ax.get_position()  # 获取 ax 的位置信息
-    new_position = [original_position.x0, original_position.y0,
+    new_position = [original_position.x0 + 0.05, original_position.y0,
                 original_position.width, original_position.height]
     print(new_position)
     ax.set_position(new_position)
 
     # **定义颜色映射**
     color_map = {
-        'neutral': '#8dd3c7',
+        'neutral': '#59C9A5',
         # 'right': '#ffffb3',
-        'up': '#fb8072',
-        'down': '#bebada',
-        'neutral-down': '#fdb462',
+        'up': '#FC9F5B',
+        'down': '#D7B9D5',
+        'neutral-down': '#1E96FC',
         'neutral-up': '#b3de69',
-        'down-up': '#fccde5',
+        'down-up': '#DE425B',
     }
 
     # previous_orient = None
@@ -1385,8 +1385,16 @@ def plot_orientation_segments(orientation_segments, save_path):
     # accumulated_end_time = None
     # accumulated_y_values = []
 
-    total_frames = orientation_segments[-1]["end_frame"]
-    weighted_sum = 0.0
+    total_frames = 0
+    standing_frames = 0
+    down_frames = 0
+    transitions_count = 0  # Count of transitions
+    total_low_frames = 0  # Total frames where head_y <= 0.6
+    store_frames = 0
+
+    # Track the previous state (None means uninitialized)
+    previous_state = None  # Can be 'high' (>0.8), 'low' (<0.6), or None
+    store_state = None
 
     # **遍历 orientation_segments，绘制 head_y 轨迹**
     for entry in orientation_segments:
@@ -1394,8 +1402,39 @@ def plot_orientation_segments(orientation_segments, save_path):
         end_time = entry["end_frame"]
         head_y = entry["head_y"]
         orient = entry["orient"]
+        duration_frames = entry['duration_frames']
 
-        weight = (end_time - start_time + 1) / total_frames
+        total_frames += duration_frames
+        current_state = None
+        if isinstance(head_y, (int, float)):
+            if head_y > 0.6:
+                current_state = 'high'
+                standing_frames += duration_frames
+            else:
+                current_state = 'low'
+                total_low_frames += duration_frames
+                if orient == 'down' or ('down' in orient.split('-')):
+                    down_frames += duration_frames
+                
+        elif isinstance(head_y, list) and len(head_y) == 2:  # List of two values case
+            if sum(head_y) / len(head_y) > 0.6:
+                current_state = 'high'
+                standing_frames += duration_frames
+            else:
+                current_state = 'low'
+                total_low_frames += duration_frames
+                if orient == 'down' or ('down' in orient.split('-')):
+                    down_frames += duration_frames
+
+        # Check if there is a transition from high to low or low to high
+        if previous_state and current_state and previous_state != current_state:
+            transitions_count += 1
+            store_state = previous_state
+            store_frames = total_frames
+        # Update previous state
+        if current_state:
+            previous_state = current_state        
+
 
         # **获取颜色**
         color = color_map.get(orient, 'gray')
@@ -1437,8 +1476,6 @@ def plot_orientation_segments(orientation_segments, save_path):
         else:
             continue  # **数据格式错误，跳过**
         
-        weighted_sum += head_y_value * weight
-        
         plt.plot(x_values, y_values, color=color, linewidth=2, label=orient if orient not in plt.gca().get_legend_handles_labels()[1] else "")
         
         # plt.fill_between(x_values, y_values, 0, color=color, alpha=0.3, label=orient if orient not in plt.gca().get_legend_handles_labels()[1] else "")
@@ -1474,12 +1511,13 @@ def plot_orientation_segments(orientation_segments, save_path):
             if np.any(new_y_values < current_y_values):
                 plt.fill_between(x_values, new_y_values, 0, color=hex_color)
                 current_y_values = new_y_values
+    
 
     # **添加图例、标签、网格**
     plt.rcParams['font.family'] = 'Segoe UI'
     plt.ylim(0, 1)
     plt.xlabel("Frame Index", fontsize=12, color='#525252')
-    plt.ylabel("Nose Height (Normalized)", fontsize=12, color='#525252')
+    plt.ylabel("Eye Height (Normalized)", fontsize=12, color='#525252')
     # ax.get_yaxis().set_visible(False)
     ax.yaxis.set_ticks([])
     ax.set_xlim(left=0)
@@ -1502,30 +1540,47 @@ def plot_orientation_segments(orientation_segments, save_path):
 
 
     # 在左侧添加图片
-    target_height =  0.78
+    target_height =  0.79
     target_width = target_height * aspect_ratio
-    ax_img1 = fig.add_axes([0.01, 0.1, target_width, target_height], anchor='W')  # 确保图片的高度与 0-1 对齐
+    ax_img1 = fig.add_axes([0.04, 0.09, target_width, target_height], anchor='W')  # 确保图片的高度与 0-1 对齐
     ax_img1.imshow(left_img)
     ax_img1.axis('off')
     ax_img1.set_zorder(0)
 
-    # 获取图片的原始像素大小
-    img_width, img_height = right_img.size
+    # # 获取图片的原始像素大小
+    # img_width, img_height = right_img.size
 
-    # 获取 fig 的大小 (单位是英寸)
-    fig_width, fig_height = fig.get_size_inches()
+    # # 获取 fig 的大小 (单位是英寸)
+    # fig_width, fig_height = fig.get_size_inches()
 
-    # 将图片的像素尺寸转化为规范化坐标 (0-1 范围)
-    norm_width = img_width / (fig_width * fig.dpi)
-    norm_height = img_height / (fig_height * fig.dpi)
-    x0, y0, width, height = new_position
-    new_y = y0 + height * weighted_sum - 0.22 * height
+    # # 将图片的像素尺寸转化为规范化坐标 (0-1 范围)
+    # norm_width = img_width / (fig_width * fig.dpi)
+    # norm_height = img_height / (fig_height * fig.dpi)
+    # x0, y0, width, height = new_position
 
-    # 添加第二个图片
-    ax_img2 = fig.add_axes([0.04, new_y, norm_width, norm_height], anchor='W')
-    ax_img2.imshow(right_img)
-    ax_img2.axis('off')
-    ax_img2.set_zorder(0)
+    #  # Calculate ratios
+    # standing_ratio = standing_frames / total_frames if total_frames > 0 else 0
+    # down_ratio = down_frames / total_low_frames if total_low_frames > 0 else 0
+    
+    # image = []
+    # if standing_ratio > 0.8:
+    #     new_y = y0 - 0.01 + height *  2 / 3
+    #     image.append(1)
+    # elif transitions_count > 0:
+    #     new_y = y0 - 0.01 + height *  1 / 3
+    #     image.append(1)
+    # else:
+    #     new_y = y0 - 0.01
+    #     if down_ratio > 0.8:
+    #         image.append(3)
+    #     else:
+    #         image.append(2)
+
+    # # 添加第二个图片
+    # ax_img2 = fig.add_axes([0.85, new_y, norm_width, norm_height], anchor='W')
+    # ax_img2.imshow(right_img)
+    # ax_img2.axis('off')
+    # ax_img2.set_zorder(0)
 
     # 保存图像到指定路径
     plt.savefig(save_path)
@@ -1680,19 +1735,20 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
 
     # 定义颜色映射
     color_map = {
-        'neutral': '#8dd3c7',
-        'up': '#fb8072',
-        'down': '#bebada',
-        'neutral-down': '#fdb462',
+        'neutral': '#59C9A5',
+        # 'right': '#ffffb3',
+        'up': '#FC9F5B',
+        'down': '#D7B9D5',
+        'neutral-down': '#1E96FC',
         'neutral-up': '#b3de69',
-        'down-up': '#fccde5',
+        'down-up': '#DE425B',
     }
     colors = [color_map.get(orient, 'gray') for orient in orients]
 
-    bar_height = 100
-    bar_spacing = 40
+    bar_height = 60
+    bar_spacing = 20
 
-    target_width_px = 1000
+    target_width_px = 1280
     if len(orients) == 1 :
         target_height_px =  bar_height + 20
     else: 
@@ -1701,7 +1757,7 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
     fig_width, fig_height = target_width_px / dpi, target_height_px / dpi
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     original_position = ax.get_position()  # 获取 ax 的位置信息
-    new_position = [original_position.x0 + 0.01, original_position.y0 + 0.05,
+    new_position = [original_position.x0 + 0.05, original_position.y0 + 0.05,
                 original_position.width, original_position.height]
     ax.set_position(new_position)
 
@@ -1718,13 +1774,13 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
 
     for i, (orient_name, color) in enumerate(zip(orients, colors)):
         y_pos1 = cal_abs_value(10 + i * (bar_height + bar_spacing), target_height_px)
-        y_pos2 = cal_abs_value(10 + i * (bar_height + bar_spacing) + 10, target_height_px)
-        y_pos3 = cal_abs_value(10 + i * (bar_height + bar_spacing) + 50, target_height_px)
-        y_positions.append(cal_abs_value(60 + i * (bar_height + bar_spacing), target_height_px))
+        y_pos2 = cal_abs_value(10 + i * (bar_height + bar_spacing) + 2, target_height_px)
+        y_pos3 = cal_abs_value(10 + i * (bar_height + bar_spacing) + 30, target_height_px)
+        y_positions.append(cal_abs_value(40 + i * (bar_height + bar_spacing), target_height_px))
 
         fancy_box = FancyBboxPatch(
-            xy=(0.02, y_pos1),               # 矩形的左下角位置
-            width=0.9,                   # 宽度
+            xy=(0.015, y_pos1),               # 矩形的左下角位置
+            width=0.924,                   # 宽度
             height=cal_abs_value(bar_height, target_height_px), 
             boxstyle="round,pad=0.01",      # 矩形样式为圆角，带有内边距        
             facecolor=color,       # 填充颜色
@@ -1736,9 +1792,9 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
         # ax.text(0.9, y_pos3, times[i], fontsize=14, ha='center', va='center', color=color)
 
         fancy_box = FancyBboxPatch(
-            xy=(0.02, y_pos2),               # 矩形的左下角位置
+            xy=(0.015, y_pos2),               # 矩形的左下角位置
             width=cal_abs_value(times[i], total_frames) * 0.9,  
-            height=cal_abs_value(bar_height*0.8, target_height_px),                  # 高度
+            height=cal_abs_value(bar_height*0.95, target_height_px),                  # 高度
             boxstyle="round,pad=0.01",   # 矩形样式为圆角，带有内边距
             facecolor=color,       # 填充颜色
             linewidth=0,                 # 边框宽度
@@ -1764,18 +1820,18 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
                 img = Image.open(image_path)
                 imagebox = OffsetImage(img)
                 if len(images_to_add) == 1:
-                    ab = AnnotationBbox(imagebox, (0.05, y_pos3), 
-                                    frameon=False, xycoords='axes fraction')
+                    ab = AnnotationBbox(imagebox, (0.01, y_pos3), 
+                                    frameon=False, xycoords='axes fraction', box_alignment=(0, 0.5))
                 else:
-                    ab = AnnotationBbox(imagebox, (0.05 + 0.08 * i, y_pos3), 
-                                    frameon=False, xycoords='axes fraction')
+                    ab = AnnotationBbox(imagebox, (0.01 + 0.04 * i, y_pos3), 
+                                    frameon=False, xycoords='axes fraction', box_alignment=(0, 0.5))
                 ax.add_artist(ab)
         
 
     ax.set_yticks(y_positions)
     orients = [label.capitalize() for label in orients]
     ax.set_yticklabels(orients)
-    ax.tick_params(axis='y', labelsize=14, labelcolor='#525252')
+    ax.tick_params(axis='y', labelsize=12, labelcolor='#525252')
 
     # 保存并关闭图表
     plt.savefig(save_path)
@@ -1784,7 +1840,7 @@ def plot_orientation_bar_chart(orientation_segments, save_path):
 
 if __name__ == "__main__":
 
-    filename="output_data6.json"
+    filename="tv6.json"
     fps, people_counts, body_height, orientation, head_y = load_json_data(filename)
     
 
@@ -1858,7 +1914,7 @@ if __name__ == "__main__":
     response_data.update(image_urls)  # 添加图片 URL 键值对
 
 
-    # print(orientation_segments)
+    print(orientation_segments)
     
     # plot_orientation_segments_with_images(orientation_segments)
     

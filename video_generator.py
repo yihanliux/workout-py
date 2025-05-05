@@ -155,7 +155,7 @@ def analyze_orientation(cx_list, cy_list):
     dy_mouth = (cy_list[LEFT_MOUTH] + cy_list[RIGHT_MOUTH])/2
 
     # 根据角度分类姿态
-    if 40 <= avg_angle <= 100:
+    if 35 <= avg_angle <= 100:
         # if  d_ear_x < threshold:
         #     if  d_ear_x > cx_list[NOSE]:
         #         return "left", d_ear_x
@@ -166,9 +166,9 @@ def analyze_orientation(cx_list, cy_list):
             return "down"
         else:
             return "neutral"
-    elif 0 <= avg_angle <= 40:
+    elif 0 <= avg_angle <= 35:
         return "down" 
-    elif 100 <= avg_angle <= 180:
+    elif 95 <= avg_angle <= 180:
         return "up"
     else:
         return "unknown"
@@ -298,7 +298,6 @@ def generate_video(input_video, output_video):
     print(f"处理完成，输出视频已保存至: {output_video}")
     print(f"帧数据已保存至: {json_output}")
 
-
 def generate_video2(input_video, output_video):
     """读取视频，每 2 帧读取 1 帧，并让未处理的帧复制上一帧的图像和数据"""
 
@@ -350,7 +349,7 @@ def generate_video2(input_video, output_video):
     cv2.destroyAllWindows()
 
     # 将数据写入 JSON 文件
-    json_output = "output_data11.json"
+    json_output = "tv5.json"
     output_data = {
         "fps": fps,  
         "frames": frame_data_list     
@@ -362,4 +361,4 @@ def generate_video2(input_video, output_video):
     print(f"帧数据已保存至: {json_output}")
 
 if __name__ == "__main__":
-    generate_video2("video11.mp4", "output_test11.mp4")
+    generate_video2("tv5.mp4", "output_tv5.mp4")
